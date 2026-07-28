@@ -28,7 +28,7 @@ parts:
     source: https://dl.google.com/android/repository/platform-tools_r37.0.0-linux.zip
     source-type: zip
     override-build: |
-      install -D adb "$CRAFT_PART_INSTALL/usr/bin/adb"
+      install -D platform-tools/adb "$CRAFT_PART_INSTALL/usr/bin/adb"
 
   nib:
     plugin: nil
