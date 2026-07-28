@@ -33,6 +33,9 @@ fn get_ports_for_serial(serial: &str) -> (u16, u16) {
     (video_port, input_port)
 }
 
+/// Closure supplied by the settings page to build a `StreamConfig` on demand.
+type ConfigProvider = Rc<RefCell<Option<Box<dyn Fn() -> StreamConfig>>>>;
+
 /// GObject subclass implementation details for `ConnectionStatusPage`.
 mod imp {
     use super::*;
@@ -48,8 +51,7 @@ mod imp {
         pub device_rows: Rc<RefCell<Vec<adw::ActionRow>>>,
         /// Active streaming daemons keyed by ADB device serial.
         pub daemons: Rc<RefCell<HashMap<String, NibDaemon>>>,
-        /// Closure supplied by the settings page to build a `StreamConfig` on demand.
-        pub config_provider: Rc<RefCell<Option<Box<dyn Fn() -> StreamConfig>>>>,
+        pub config_provider: ConfigProvider,
         /// Serials of devices seen on the last device-monitoring poll.
         pub known_devices: Rc<RefCell<Vec<String>>>,
         /// Cache of resolved (display name, is_tablet) per serial, to avoid repeated ADB queries.

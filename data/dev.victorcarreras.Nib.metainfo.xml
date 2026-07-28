@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.victorcarreras.Nib</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Nib</name>
+  <summary>Use your tablet as a stylus-ready second display for GNOME</summary>
+  <description>
+    <p>
+      Nib turns your Android tablet or iPad into a low-latency external display
+      for GNOME, with full touch, gesture, and active stylus/pencil support.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Hardware-accelerated, low-latency video streaming</li>
+      <li>Extend your GNOME desktop or mirror your main display</li>
+      <li>Multi-finger trackpad gestures: click, right-click, scroll, and workspace switching</li>
+      <li>Pressure- and tilt-aware stylus input for Krita, GIMP, and Inkscape</li>
+      <li>Connect over USB or Wi-Fi, with support for multiple devices at once</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.victorcarreras.Nib.desktop</launchable>
+  <url type="homepage">https://github.com/vicajilau/nib</url>
+  <url type="bugtracker">https://github.com/vicajilau/nib/issues</url>
+  <developer id="dev.victorcarreras">
+    <name>Victor C.</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-07-28">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

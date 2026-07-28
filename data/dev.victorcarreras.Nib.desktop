@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Nib
+Comment=Use your tablet as a stylus-ready second display for GNOME
+Exec=nib
+Icon=dev.victorcarreras.Nib
+Terminal=false
+StartupNotify=true
+Categories=GNOME;GTK;Utility;
+Keywords=tablet;display;stylus;pencil;screen;android;ipad;monitor;
