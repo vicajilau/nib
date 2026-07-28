@@ -52,8 +52,8 @@
                 {
                     "type": "git",
                     "url": "https://github.com/vicajilau/nib.git",
-                    "tag": "v0.1.1",
-                    "commit": "5f0edd16be1ef5cc77e77196c8969405667378de"
+                    "tag": "v0.1.2",
+                    "commit": "7469ab2ace0e701966ccde5fc10c63b527f99bdc"
                 },
                 "cargo-sources.json",
                 {
