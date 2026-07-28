@@ -141,8 +141,14 @@ impl ScreencastPipeline {
             "video/x-raw,width={},height={}",
             self.config.width, self.config.height
         );
+        // The plain (no memory-feature) "video/x-raw" caps right after pipewiresrc rule out
+        // DMA-BUF for this negotiation, forcing system-memory buffers. Under sandboxing the
+        // snap/Flatpak-bundled Mesa version doesn't match the host compositor's, and DMA-BUF
+        // modifier negotiation between the two silently produces black frames instead of an
+        // error. System memory has no such cross-version dependency, at the cost of an extra
+        // copy that videoconvert would need to do anyway.
         format!(
-            "{} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert n-threads=4 ! videoscale ! {} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! {} ! h264parse config-interval=1 ! appsink name=sink sync=false max-buffers=1 drop=true",
+            "{} ! video/x-raw ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert n-threads=4 ! videoscale ! {} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! {} ! h264parse config-interval=1 ! appsink name=sink sync=false max-buffers=1 drop=true",
             src, caps, encoder_str
         )
     }
