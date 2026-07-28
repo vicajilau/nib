@@ -12,7 +12,7 @@
         "--share=ipc",
         "--socket=wayland",
         "--socket=fallback-x11",
-        "--socket=session-bus",
+        "--talk-name=org.kde.StatusNotifierWatcher",
         "--device=dri",
         "--device=all"
     ],
@@ -52,8 +52,8 @@
                 {
                     "type": "git",
                     "url": "https://github.com/vicajilau/nib.git",
-                    "tag": "v0.1.0",
-                    "commit": "fa8e4c388b24a8340a0bac67267c074e294b78f1"
+                    "tag": "v0.1.1",
+                    "commit": "5f0edd16be1ef5cc77e77196c8969405667378de"
                 },
                 "cargo-sources.json",
                 {
