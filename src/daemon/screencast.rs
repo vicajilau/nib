@@ -27,7 +27,7 @@ impl ScreencastPipeline {
 
     /// Builds `key=value` property assignments for only the properties `element_name` actually
     /// exposes, so a hardcoded property list doesn't break against older/newer plugin builds
-    /// (e.g. bundled in a Flatpak/Snap runtime) that don't support every property.
+    /// (e.g. bundled in a Flatpak runtime) that don't support every property.
     fn supported_properties(element_name: &str, desired: &[(&str, &str)]) -> String {
         let Ok(element) = gstreamer::ElementFactory::make(element_name).build() else {
             return String::new();
@@ -40,44 +40,16 @@ impl ScreencastPipeline {
             .join(" ")
     }
 
-    /// Whether *this* process is actually confined (Flatpak, or a strict snap).
-    ///
-    /// Deliberately not `ashpd::is_sandboxed()` (checks for a `SNAP` env var), nor
-    /// `SNAP_CONFINEMENT` (not set at all by snapd 2.76.1, verified against a running
-    /// strictly-confined snap process): both are unreliable, since `SNAP*`/`SNAP_CONTEXT`/
-    /// `SNAP_COOKIE` env vars are inherited unchanged by every child process of a
-    /// snap-packaged parent (e.g. a terminal opened from the `classic`-confined VS Code
-    /// snap), regardless of whether *this* process is confined at all. The AppArmor profile
-    /// in `/proc/self/attr/current` looked promising too, but strict confinement denies a
-    /// process from reading even its own profile ("Permission denied" verified inside a real
-    /// strictly-confined snap shell), making it useless for a process to check itself.
-    ///
-    /// Instead, check the kernel's seccomp mode for this process in `/proc/self/status`.
-    /// Strict confinement installs a real seccomp filter (mode 2) that blocks the raw
-    /// GPU/driver device access hardware encoders need; `classic` confinement and devmode
-    /// don't install one (mode 0). Unlike env vars, this can't leak the wrong way: seccomp
-    /// filters are enforced by the kernel and inherited by child processes but can only be
-    /// tightened, never removed, so a dev shell nested under the classic-confined VS Code
-    /// snap still correctly reads mode 0 (verified), while the real strictly-confined nib
-    /// snap reads mode 2 (also verified).
+    /// Whether *this* process is actually confined (Flatpak).
     fn is_running_confined() -> bool {
-        if std::path::Path::new("/.flatpak-info").exists() {
-            return true;
-        }
-        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("Seccomp:"))
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .is_some_and(|mode| mode == 2)
+        std::path::Path::new("/.flatpak-info").exists()
     }
 
     /// Auto-detects and returns configured H.264 encoder string with zero-latency parameters.
     ///
-    /// Hardware encoders are skipped when running sandboxed (Flatpak/Snap): under strict
-    /// confinement the app only gets Mesa/open-source GPU libraries (e.g. Snap's gpu-2404
-    /// content interface via mesa-2404), not the host's proprietary NVIDIA driver that
-    /// nvh264enc/vah264enc need, so the encoder element loads but silently produces no
+    /// Hardware encoders are skipped when running sandboxed (Flatpak): under confinement the
+    /// app only gets Mesa/open-source GPU libraries, not the host's proprietary NVIDIA driver
+    /// that nvh264enc/vah264enc need, so the encoder element loads but silently produces no
     /// output. Software encoding has no such dependency and always works.
     fn detect_encoder_pipeline_string() -> String {
         let sandboxed = Self::is_running_confined();
@@ -175,7 +147,7 @@ impl ScreencastPipeline {
         );
         // The plain (no memory-feature) "video/x-raw" caps right after pipewiresrc rule out
         // DMA-BUF for this negotiation, forcing system-memory buffers. Under sandboxing the
-        // snap/Flatpak-bundled Mesa version doesn't match the host compositor's, and DMA-BUF
+        // Flatpak-bundled Mesa version doesn't match the host compositor's, and DMA-BUF
         // modifier negotiation between the two silently produces black frames instead of an
         // error. System memory has no such cross-version dependency, at the cost of an extra
         // copy that videoconvert would need to do anyway.
