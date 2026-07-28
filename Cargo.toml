@@ -2,7 +2,7 @@
 name = "nib"
 version = "0.1.0"
 edition = "2021"
-authors = ["Vicajilau <vicajilau@gnome.org>"]
+authors = ["Victor C. <34163765+vicajilau@users.noreply.github.com>"]
 description = "Connect your Android tablet as an external display with touch & stylus support in GNOME"
 license = "GPL-3.0-or-later"
 

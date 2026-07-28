@@ -172,9 +172,9 @@ impl NibApplication {
             .comments(
                 "Connect your Android tablet as an external display with touch and stylus support",
             )
-            .website("https://gitlab.gnome.org/")
-            .issue_url("https://gitlab.gnome.org/")
-            .license_type(gtk4::License::Gpl30Only)
+            .website("https://github.com/vicajilau/nib")
+            .issue_url("https://github.com/vicajilau/nib/issues")
+            .license_type(gtk4::License::Gpl30)
             .translator_credits("Vicajilau")
             .build();
 
