@@ -53,12 +53,23 @@ parts:
       - gstreamer1.0-plugins-bad
       - gstreamer1.0-plugins-ugly
       - gstreamer1.0-vaapi
-      # The gnome-46-2404 runtime's bundled harfbuzz is older than what this
-      # binary is built against in the core24 build environment, and is
-      # missing symbols (hb_free) our GTK4/Pango stack needs. Stage our own
-      # matching copy so it takes precedence over the runtime's version.
+      # The gnome-46-2404 runtime's bundled GTK4/Pango/Cairo stack is older
+      # than what this binary links against in the core24 build environment
+      # (confirmed missing symbols one at a time: harfbuzz's hb_free, then
+      # GTK4's pango_font_map_add_font_file). Stage the whole render stack
+      # ourselves so it's guaranteed ABI-consistent with what was built,
+      # instead of depending on the frozen runtime snap's exact versions.
       - libharfbuzz0b
       - libharfbuzz-subset0
+      - libgtk-4-1
+      - libadwaita-1-0
+      - libpango-1.0-0
+      - libpangocairo-1.0-0
+      - libpangoft2-1.0-0
+      - libcairo2
+      - libcairo-gobject2
+      - libgdk-pixbuf-2.0-0
+      - libgraphene-1.0-0
     build-environment:
       - PATH: $HOME/.cargo/bin:$PATH
     override-build: |
