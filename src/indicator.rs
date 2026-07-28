@@ -171,7 +171,11 @@ impl IndicatorManager {
             quit_cb,
         };
 
+        // Avoid requesting the well-known `org.kde.StatusNotifierItem-*` D-Bus name: sandboxes
+        // like Flatpak either deny it outright or only grant narrow, explicit `--talk-name`
+        // permissions. The connection's own unique name works just as well for registration.
         let handle = tray
+            .disable_dbus_name(true)
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to spawn top bar indicator tray: {}", e));
 
