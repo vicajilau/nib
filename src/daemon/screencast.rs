@@ -41,8 +41,20 @@ impl ScreencastPipeline {
     }
 
     /// Auto-detects and returns configured H.264 encoder string with zero-latency parameters.
+    ///
+    /// Hardware encoders are skipped when running sandboxed (Flatpak/Snap): under strict
+    /// confinement the app only gets Mesa/open-source GPU libraries (e.g. Snap's gpu-2404
+    /// content interface via mesa-2404), not the host's proprietary NVIDIA driver that
+    /// nvh264enc/vah264enc need, so the encoder element loads but silently produces no
+    /// output. Software encoding has no such dependency and always works.
     fn detect_encoder_pipeline_string() -> String {
-        if gstreamer::ElementFactory::find("nvh264enc").is_some() {
+        let sandboxed = ashpd::is_sandboxed();
+        if sandboxed {
+            tracing::info!(
+                "Running sandboxed: skipping hardware encoders, which need proprietary GPU driver access that isn't reliably available under confinement"
+            );
+        }
+        if !sandboxed && gstreamer::ElementFactory::find("nvh264enc").is_some() {
             tracing::info!("Selected NVIDIA NVENC Hardware Encoder (nvh264enc) [Zero Latency]");
             let props = Self::supported_properties(
                 "nvh264enc",
@@ -56,7 +68,7 @@ impl ScreencastPipeline {
                 ],
             );
             format!("nvh264enc {}", props)
-        } else if gstreamer::ElementFactory::find("vah264enc").is_some() {
+        } else if !sandboxed && gstreamer::ElementFactory::find("vah264enc").is_some() {
             tracing::info!("Selected VA-API Hardware Encoder (vah264enc)");
             let props = Self::supported_properties(
                 "vah264enc",
@@ -68,7 +80,7 @@ impl ScreencastPipeline {
                 ],
             );
             format!("vah264enc {}", props)
-        } else if gstreamer::ElementFactory::find("vaapih264enc").is_some() {
+        } else if !sandboxed && gstreamer::ElementFactory::find("vaapih264enc").is_some() {
             tracing::info!("Selected VA-API Hardware Encoder (vaapih264enc)");
             let props = Self::supported_properties(
                 "vaapih264enc",
