@@ -1,81 +1,108 @@
-# Nib 📱💻
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/dev.victorcarreras.Nib.svg" width="128" height="128" alt="Nib logo">
+</p>
 
-**Nib** is an open-source, high-performance desktop extension designed for use with **GNOME**. It transforms **Android tablets/smartphones** and **Apple iPads/iPhones** into low-latency external secondary displays with full touch, gesture, and active stylus/pencil support.
+<h1 align="center">Nib</h1>
 
-Written in **Rust**, **GTK4**, **Libadwaita**, and **Flutter**, Nib provides a native, seamless experience adhering to official GNOME Human Interface Guidelines (HIG).
+<p align="center">
+  <a href="https://github.com/vicajilau/nib/actions/workflows/ci.yml">
+    <img src="https://github.com/vicajilau/nib/actions/workflows/ci.yml/badge.svg" alt="CI status">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg" alt="License: GPL-3.0-or-later">
+  </a>
+</p>
 
----
+**Nib** is an open-source desktop extension designed for use with **GNOME**. It turns an **Android tablet or phone** into a low-latency external secondary display with full touch, gesture, and active stylus support.
 
-## 🌟 Key Features
+Written in **Rust**, **GTK4**, and **Libadwaita** on the desktop side, with a **Flutter** companion app on the device side, Nib provides a native, seamless experience adhering to the GNOME Human Interface Guidelines (HIG).
 
-- **Multiplatform Client (`nib_client`)**: Single cross-platform Flutter codebase supporting both Android and iOS/iPadOS devices.
-- **Hardware-Accelerated Zero-Copy Video Decoding**:
-  - **Android**: `MediaCodec` + `SurfaceTexture` via Kotlin Platform Channels.
-  - **iPadOS / iOS**: `VideoToolbox` (`VTDecompressionSession`) + `CVPixelBuffer` via Swift.
-- **Concurrent Multi-Device Support**: Connect multiple tablets/phones simultaneously without port collision using deterministic port-pair allocation (`6000 + slot * 2` for video, `6001 + slot * 2` for input).
-- **Accurate Commercial Device & Icon Detection**: Automatically classifies connected hardware into tablets or smartphones (`tablet-symbolic` vs `phone-symbolic`) by querying market names (`ro.product.marketname`) and physical aspect ratios.
-- **Advanced Gestures & Stylus Handling**:
-  - 1-Finger Tap/Drag: Left click and window selection.
-  - 2-Finger Tap: Right click (context menus).
-  - 2-Finger Swipe: Smooth 2-axis scrolling.
-  - 3-Finger Swipe: Triggers native GNOME Workspaces & Overview.
-  - Active Stylus / Apple Pencil: Sub-pixel precision with pressure and tilt data for Krita, GIMP, and Inkscape.
-- **Libadwaita Toast Notifications**: Non-intrusive floating toasts (`adw::ToastOverlay`) for real-time user feedback (e.g., portal cancellation, connection events).
+> **Status:** Android is fully functional today (video streaming, touch, gestures, stylus). The iOS/iPadOS client is scaffolded but the native video decoder (VideoToolbox) isn't implemented yet — see [Building & Running](#building--running).
 
 ---
 
-## 🏗️ Architecture Stack
+## Key Features
+
+- **Low-latency video streaming**: Hardware-accelerated H.264 encoding on the host (VA-API / NVENC, with a software fallback) decoded via Android's `MediaCodec` on the device.
+- **Concurrent multi-device support**: Connect several tablets/phones at once without port collisions, using deterministic port-pair allocation (`6000 + slot * 2` for video, `6001 + slot * 2` for input).
+- **Automatic device classification**: Detects whether a connected Android device is a tablet or a phone (`tablet-symbolic` vs `phone-symbolic`) by querying its market name and physical aspect ratio over ADB.
+- **Gestures & stylus handling**:
+  - 1-finger tap/drag: left click and window selection.
+  - 2-finger tap: right click (context menu).
+  - 2-finger swipe: smooth 2-axis scrolling.
+  - 3-finger swipe: GNOME Workspaces & Overview.
+  - Active stylus: pressure and tilt data for Krita, GIMP, and Inkscape.
+- **Libadwaita toast notifications** for real-time feedback (portal cancellation, connection events, etc.).
+
+---
+
+## Architecture
 
 ```mermaid
 graph TD
     subgraph Host ["Nib Host (Linux Desktop)"]
-        A[GTK4 / Libadwaita UI - Rust] --> B[ADB / usbmuxd Transport Manager]
-        A --> C[XDG Desktop Portal - ScreenCast API]
+        A[GTK4 / Libadwaita UI - Rust] --> B[ADB Transport Manager]
+        A --> C[XDG Desktop Portal - ScreenCast / RemoteDesktop]
         C --> D[GStreamer H.264 Encoder]
     end
 
     subgraph Transport ["Low-Latency USB / TCP Protocol"]
-        B -->|ADB Reverse / iproxy| E[Video Stream Socket: 6000+slot*2]
-        B -->|ADB Reverse / iproxy| F[Input Socket: 6001+slot*2]
+        B -->|ADB Reverse| E[Video Stream Socket: 6000+slot*2]
+        B -->|ADB Reverse| F[Input Socket: 6001+slot*2]
     end
 
     subgraph Client ["Nib Client (Flutter)"]
         E --> G[MediaDecoderEngine - Platform Channel]
         F --> H[InputSocketClient - Touch & Stylus]
-        G --> I[Impeller / Vulkan Video Texture]
-        H --> J[StylusInputHandler]
+        G --> I[Android Texture - MediaCodec]
     end
 
-    I --> K[Android Tablet / iPad Display]
+    I --> J[Android Tablet Display]
 ```
 
-### **1. Host Application (Linux)**
-* **Language:** Rust (`1.75+`)
-* **UI Framework:** GTK4 & Libadwaita (`libadwaita-rs`, `gtk4-rs`)
-* **Display Server & Portal:** Wayland / Mutter via `org.freedesktop.portal.ScreenCast`
-* **Video Pipeline:** GStreamer (`gstreamer-rs`) with VA-API / NVENC H.264 encoding
-* **Input Injection:** Linux `uinput` (`evdev-rs`)
+### 1. Host application (Linux)
 
-### **2. Client Application (`nib_client`)**
+* **Language:** Rust
+* **UI framework:** GTK4 & Libadwaita (`gtk4-rs`, `libadwaita-rs`)
+* **Display server & portals:** Wayland / Mutter via `org.freedesktop.portal.ScreenCast` and `RemoteDesktop`
+* **Video pipeline:** GStreamer (`gstreamer-rs`) with VA-API / NVENC H.264 encoding
+* **Input injection:** Freedesktop RemoteDesktop portal (`ashpd`) — no raw `uinput` access needed
+
+### 2. Client application (`nib_client`)
+
 * **Framework:** Flutter (Dart)
-* **Android Plugin:** Kotlin (`MediaCodec` + `SurfaceTexture`)
-* **iOS / iPadOS Plugin:** Swift (`VideoToolbox` + `CVPixelBuffer`)
+* **Android:** Kotlin plugin using `MediaCodec` + `SurfaceTexture` — implemented and working
+* **iOS / iPadOS:** Swift plugin using `VideoToolbox` + `CVPixelBuffer` — planned, not yet implemented (contributions welcome)
 * **Protocol:** Low-overhead TCP binary protocol
 
 ---
 
-## 🔌 Distribution & Packaging Strategy (Flathub)
+## Distribution & Packaging (Flathub)
 
-To deliver a **Zero-Setup "Plug & Play"** user experience:
+To deliver a zero-setup, plug-and-play experience:
 
-- **Flatpak Packaging (`dev.victorcarreras.Nib.json`)**: Bundles the lightweight `android-tools` (`adb`) binary directly inside the sandbox container. Users can install Nib with one click from **GNOME Software** without installing the Android SDK. (`usbmuxd`/`iproxy` for iOS will be added once the iOS transport lands on the host side.)
-- **Wi-Fi / LAN Network Fallback**: Allows direct TCP IP connection over Wi-Fi without requiring USB Debugging or physical cables.
+- **Flatpak packaging** (`dev.victorcarreras.Nib.json`): bundles the `adb` binary directly inside the sandbox, so users can install Nib from **GNOME Software** without installing the Android SDK.
+- **Wi-Fi / LAN fallback**: direct TCP connection over Wi-Fi, without USB debugging or a cable.
 
 ---
 
-## 🚀 Building & Running
+## Getting Started
 
-### Host App (Linux)
+Nib talks to your Android device over ADB, so USB debugging has to be enabled once before the first connection:
+
+1. On the Android device, open **Settings → About phone/tablet** and tap **Build number** 7 times to unlock Developer Options.
+2. Go to **Settings → System → Developer options** and enable **USB debugging**.
+3. Connect the device to your computer with a USB cable.
+4. Accept the **"Allow USB debugging?"** prompt that appears on the device (check **"Always allow from this computer"** to skip it next time).
+5. Launch Nib on the desktop — the device should appear in the device list, ready to stream.
+
+Prefer not to use a cable? Once the host and the Flutter client are both running on the same network, you can connect over Wi-Fi/LAN instead (see [Distribution & Packaging](#distribution--packaging-flathub)).
+
+---
+
+## Building & Running
+
+### Host app (Linux)
 
 #### Prerequisites
 ```bash
@@ -86,25 +113,29 @@ sudo apt install cargo rustc libgtk-4-dev libadwaita-1-dev libgstreamer1.0-dev l
 sudo dnf install cargo rust-compiler gtk4-devel libadwaita-devel gstreamer1-devel pipewire-devel android-tools
 ```
 
-#### Run Host
+#### Run host
 ```bash
 cargo run
 ```
 
-### Client App (Android & iPadOS)
+### Client app (Android)
 
 ```bash
 cd nib_client
 
-# Run on connected Android device / emulator
+# Run on a connected Android device / emulator
 flutter run
 
-# Build release APK
+# Build a release APK
 flutter build apk --release
 ```
 
+### Client app (iOS)
+
+The Flutter project builds for iOS, but there is no native video decoder yet — the app will connect but won't display video. If you'd like to help implement the `VideoToolbox`/`CVPixelBuffer` decoder plugin, see `nib_client/ios/Runner/AppDelegate.swift` and the Android equivalent in `nib_client/android/app/src/main/kotlin/dev/victorcarreras/nib/MainActivity.kt` for the platform-channel contract to match.
+
 ---
 
-## 📄 License
+## License
 
 GPL-3.0-or-later. Designed for use with the GNOME desktop.
