@@ -44,15 +44,21 @@ parts:
       - curl
       - meson
       - ninja-build
-    # The "gnome" extension's runtime only ships base GStreamer, not encoder
-    # plugins. Without these, every encoder in detect_encoder_pipeline_string()
-    # (nvh264enc/vah264enc/vaapih264enc/x264enc/openh264enc) is missing.
     stage-packages:
+      # The "gnome" extension's runtime only ships base GStreamer, not encoder
+      # plugins. Without these, every encoder in detect_encoder_pipeline_string()
+      # (nvh264enc/vah264enc/vaapih264enc/x264enc/openh264enc) is missing.
       - gstreamer1.0-plugins-base
       - gstreamer1.0-plugins-good
       - gstreamer1.0-plugins-bad
       - gstreamer1.0-plugins-ugly
       - gstreamer1.0-vaapi
+      # The gnome-46-2404 runtime's bundled harfbuzz is older than what this
+      # binary is built against in the core24 build environment, and is
+      # missing symbols (hb_free) our GTK4/Pango stack needs. Stage our own
+      # matching copy so it takes precedence over the runtime's version.
+      - libharfbuzz0b
+      - libharfbuzz-subset0
     build-environment:
       - PATH: $HOME/.cargo/bin:$PATH
     override-build: |
