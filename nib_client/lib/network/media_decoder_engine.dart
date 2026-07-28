@@ -14,6 +14,7 @@ class MediaDecoderEngine extends ChangeNotifier {
 
   /// Flutter texture ID backing the decoded video surface, or `null` if not decoding.
   int? get textureId => _textureId;
+
   /// Whether the native decoder currently has an active video stream connection.
   bool get isConnected => _isConnected;
 

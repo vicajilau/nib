@@ -20,6 +20,7 @@ class _DecoderScreenState extends State<DecoderScreen> {
 
   /// Whether the floating status HUD pill is currently visible.
   bool _showHud = true;
+
   /// Whether the trackpad gesture guide overlay is currently visible.
   bool _showGestureGuide = false;
 

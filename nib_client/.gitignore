@@ -36,6 +36,9 @@ migrate_working_dir/
 # Symbolication related
 app.*.symbols
 
+# l10n
+untranslated_messages.json
+
 # Obfuscation related
 app.*.map.json
 
