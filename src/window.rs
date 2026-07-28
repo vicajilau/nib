@@ -65,6 +65,7 @@ impl NibWindow {
 
         let menu_button = gtk4::MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
+        menu_button.set_tooltip_text(Some("Main Menu"));
 
         let menu = gio::Menu::new();
         menu.append(Some("About Nib"), Some("app.about"));
