@@ -1,0 +1,53 @@
+name: nib
+base: core24
+adopt-info: nib
+summary: Use your tablet as a stylus-ready second display for GNOME
+description: |
+  Nib turns your Android tablet or phone into a low-latency external display
+  for GNOME, with full touch, gesture, and active stylus/pencil support.
+grade: stable
+confinement: strict
+license: GPL-3.0-or-later
+
+platforms:
+  amd64:
+
+apps:
+  nib:
+    command: usr/bin/nib
+    extensions: [gnome]
+    common-id: dev.victorcarreras.Nib
+    plugs:
+      - network
+      - raw-usb
+      - hardware-observe
+
+parts:
+  adb:
+    plugin: nil
+    source: https://dl.google.com/android/repository/platform-tools_r37.0.0-linux.zip
+    source-type: zip
+    override-build: |
+      install -D adb "$CRAFT_PART_INSTALL/usr/bin/adb"
+
+  nib:
+    plugin: nil
+    source: .
+    parse-info: [usr/share/metainfo/dev.victorcarreras.Nib.metainfo.xml]
+    build-packages:
+      - libgtk-4-dev
+      - libadwaita-1-dev
+      - libgstreamer1.0-dev
+      - libgstreamer-plugins-base1.0-dev
+      - libpipewire-0.3-dev
+      - pkg-config
+      - curl
+      - meson
+      - ninja-build
+    build-environment:
+      - PATH: $HOME/.cargo/bin:$PATH
+    override-build: |
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      source "$HOME/.cargo/env"
+      meson setup builddir --prefix=/usr --buildtype=release
+      DESTDIR="$CRAFT_PART_INSTALL" ninja -C builddir install

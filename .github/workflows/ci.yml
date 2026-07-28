@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -122,3 +123,43 @@ jobs:
           cache-key: flatpak-builder-${{ github.sha }}
           bundle: nib.flatpak
           build-bundle: false
+
+  snap-build:
+    name: Snap build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Build snap
+        run: snapcraft pack --use-lxd
+
+      - name: Upload snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nib-snap
+          path: "*.snap"
+
+  # Publishing is manual-trigger only for now: the "nib" snap name is currently
+  # reserved on the Snap Store pending a name dispute request. Once that's
+  # resolved, this can be switched to trigger on version tags like snap-build.
+  snap-publish:
+    name: Publish snap to the Snap Store
+    if: github.event_name == 'workflow_dispatch'
+    needs: snap-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install snapcraft
+        run: sudo snap install snapcraft --classic
+
+      - name: Build snap
+        run: snapcraft pack --use-lxd
+
+      - name: Publish to the Snap Store
+        run: snapcraft upload nib_*.snap --release=stable
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_LOGIN }}
