@@ -1,6 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
-  <rect x="8" y="8" width="112" height="112" rx="28" fill="#3584e4"/>
-  <path d="M 64 26 L 90 78 L 64 66 L 38 78 Z" fill="#ffffff"/>
-  <circle cx="64" cy="94" r="6" fill="#ffffff"/>
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1a5fb4"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="6" y="6" width="116" height="116" rx="32" fill="url(#bg)"/>
+
+  <!-- Host desktop screen -->
+  <rect x="22" y="32" width="60" height="43" rx="7" fill="#ffffff"/>
+
+  <!-- Seam so the tablet reads as a separate, overlapping screen -->
+  <rect x="59" y="49" width="49" height="64" rx="11" fill="#1a5fb4"/>
+
+  <!-- Tablet screen, extending off the host display -->
+  <rect x="63" y="53" width="41" height="56" rx="9" fill="#ffffff"/>
+  <circle cx="83.5" cy="101" r="2.6" fill="#1a5fb4"/>
 </svg>
