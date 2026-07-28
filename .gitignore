@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Meson & Flatpak build artifacts
+/_build/
+/build/
+.flatpak-builder/
+
+# Editor & IDE temporary files
+.vscode/
+.idea/
+*.swp
+*~
+
+# GResource compiled binaries
+*.gresource

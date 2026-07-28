@@ -1,0 +1,153 @@
+pub mod adb_transport;
+pub mod input_injector;
+pub mod screencast;
+pub mod virtual_monitor;
+
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use adb_transport::AdbTransportManager;
+use input_injector::{InputInjector, InputServer};
+use screencast::ScreencastPipeline;
+use virtual_monitor::{DisplayMode, VirtualMonitorManager};
+
+/// User-configurable parameters describing how a single device stream should be captured,
+/// encoded, and transported.
+#[derive(Debug, Clone)]
+pub struct StreamConfig {
+    /// Target virtual/mirrored display width in pixels.
+    pub width: u32,
+    /// Target virtual/mirrored display height in pixels.
+    pub height: u32,
+    /// Target encoder framerate.
+    pub fps: u32,
+    /// Preferred GStreamer H.264 encoder identifier hint (e.g. `"vaapi"`).
+    pub encoder: String,
+    /// Whether to extend the desktop with a new virtual monitor or mirror an existing one.
+    pub display_mode: DisplayMode,
+    /// Whether stylus pressure/tilt input events should be processed.
+    pub enable_stylus: bool,
+    /// ADB serial number of the target device, or `None` to use the default/only device.
+    pub device_serial: Option<String>,
+    /// Local TCP port used for the outgoing H.264 video stream.
+    pub video_port: u16,
+    /// Local TCP port used for the incoming input event stream.
+    pub input_port: u16,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        Self {
+            width: 2560,
+            height: 1600,
+            fps: 60,
+            encoder: "vaapi".to_string(),
+            display_mode: DisplayMode::Extend,
+            enable_stylus: true,
+            device_serial: None,
+            video_port: 6000,
+            input_port: 6001,
+        }
+    }
+}
+
+/// Orchestrates a single device's end-to-end streaming session: ADB port forwarding, the
+/// virtual/mirrored display session, the input event server, and the GStreamer screencast pipeline.
+pub struct NibDaemon {
+    config: StreamConfig,
+    vm_manager: Option<Arc<Mutex<VirtualMonitorManager>>>,
+    pipeline: Option<ScreencastPipeline>,
+    input_server: Option<InputServer>,
+    /// Whether a stream is currently active for this daemon instance.
+    pub is_streaming: bool,
+}
+
+impl NibDaemon {
+    /// Creates a new, inactive `NibDaemon` with the given stream configuration.
+    pub fn new(config: StreamConfig) -> Self {
+        Self {
+            config,
+            vm_manager: None,
+            pipeline: None,
+            input_server: None,
+            is_streaming: false,
+        }
+    }
+
+    /// Starts the full streaming pipeline: ADB port forwarding, portal display session
+    /// creation, input server, and GStreamer screencast, in that order.
+    pub async fn start_stream(&mut self) -> Result<(), String> {
+        let video_port = self.config.video_port;
+        let input_port = self.config.input_port;
+
+        tracing::info!(
+            "Starting Nib Display Stream for device {:?} on ports (Video: {}, Input: {}) Mode: {:?}, Res: {}x{}@{}fps...",
+            self.config.device_serial,
+            video_port,
+            input_port,
+            self.config.display_mode,
+            self.config.width,
+            self.config.height,
+            self.config.fps
+        );
+
+        // 1. ADB Port Forwarding: Map Android ports 6000 (video) & 6001 (input) to unique PC local ports
+        let _ = AdbTransportManager::setup_port_forwarding(
+            self.config.device_serial.as_deref(),
+            video_port,
+            6000,
+        );
+        let _ = AdbTransportManager::setup_port_forwarding(
+            self.config.device_serial.as_deref(),
+            input_port,
+            6001,
+        );
+
+        // 2. Mutter / Freedesktop Portal Display Session
+        let mut vm_mgr = VirtualMonitorManager::new().await?;
+
+        let (node_id, fd) = vm_mgr
+            .create_display(
+                self.config.display_mode,
+                self.config.width,
+                self.config.height,
+            )
+            .await?;
+
+        let vm_mgr_arc = Arc::new(Mutex::new(vm_mgr));
+        self.vm_manager = Some(vm_mgr_arc.clone());
+
+        // 3. Input Listener Server (connected to RemoteDesktop portal)
+        let injector = Arc::new(InputInjector::new(
+            self.config.width,
+            self.config.height,
+            Some(vm_mgr_arc.clone()),
+        )?);
+        let input_server = InputServer::start(injector, input_port);
+        self.input_server = Some(input_server);
+
+        // 4. GStreamer PipeWire screencast pipeline targeted at display node_id and open PipeWire FD!
+        let mut pipeline = ScreencastPipeline::new(self.config.clone());
+        pipeline.start(video_port, node_id, fd)?;
+        self.pipeline = Some(pipeline);
+
+        self.is_streaming = true;
+        Ok(())
+    }
+
+    /// Stops the input server, screencast pipeline, and portal display session, in that order.
+    pub async fn stop_stream(&mut self) {
+        tracing::info!("Stopping Nib Display Stream...");
+        if let Some(mut server) = self.input_server.take() {
+            server.stop();
+        }
+        if let Some(mut pipeline) = self.pipeline.take() {
+            pipeline.stop();
+        }
+        if let Some(vm_mgr_arc) = self.vm_manager.take() {
+            let mut vm_mgr = vm_mgr_arc.lock().await;
+            let _ = vm_mgr.destroy_display().await;
+        }
+        self.is_streaming = false;
+    }
+}

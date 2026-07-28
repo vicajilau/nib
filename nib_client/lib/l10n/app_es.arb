@@ -1,0 +1,19 @@
+{
+  "@@locale": "es",
+  "appTitle": "Nib",
+  "waitingForHost": "Esperando al equipo Nib...",
+  "nibActive": "Nib Activo",
+  "gesturesGuide": "Guía de Gestos",
+  "hideGuide": "Ocultar Guía",
+  "trackpadControls": "Gestos y Controles Táctiles",
+  "oneFingerTapTitle": "1 Dedo (Toque)",
+  "oneFingerTapSubtitle": "Clic Izquierdo y Modo Selección",
+  "twoFingersTapTitle": "2 Dedos (Toque)",
+  "twoFingersTapSubtitle": "Clic Derecho (Menú Contextual)",
+  "twoFingersSwipeTitle": "2 Dedos (Desplazamiento)",
+  "twoFingersSwipeSubtitle": "Desplazamiento Suave Continuo",
+  "threeFingersSwipeTitle": "3 Dedos (Desplazamiento)",
+  "threeFingersSwipeSubtitle": "Escritorios Virtuales y Vista General",
+  "stylusTitle": "Stylus / Apple Pencil",
+  "stylusSubtitle": "Trazado con Presión e Inclinación"
+}

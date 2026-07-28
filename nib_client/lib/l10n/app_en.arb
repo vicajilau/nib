@@ -1,0 +1,67 @@
+{
+  "@@locale": "en",
+  "appTitle": "Nib",
+  "@appTitle": {
+    "description": "Application title"
+  },
+  "waitingForHost": "Waiting for Nib host...",
+  "@waitingForHost": {
+    "description": "Status text while awaiting connection from host"
+  },
+  "nibActive": "Nib Active",
+  "@nibActive": {
+    "description": "HUD status text when active"
+  },
+  "gesturesGuide": "Gestures Guide",
+  "@gesturesGuide": {
+    "description": "Button to open gestures guide"
+  },
+  "hideGuide": "Hide Guide",
+  "@hideGuide": {
+    "description": "Button to close gestures guide"
+  },
+  "trackpadControls": "Trackpad & Gesture Controls",
+  "@trackpadControls": {
+    "description": "Title of gestures guide dialog"
+  },
+  "oneFingerTapTitle": "1 Finger Tap",
+  "@oneFingerTapTitle": {
+    "description": "Title for 1-finger gesture"
+  },
+  "oneFingerTapSubtitle": "Left Click & Selection Drag",
+  "@oneFingerTapSubtitle": {
+    "description": "Subtitle for 1-finger gesture"
+  },
+  "twoFingersTapTitle": "2 Fingers Tap",
+  "@twoFingersTapTitle": {
+    "description": "Title for 2-finger tap gesture"
+  },
+  "twoFingersTapSubtitle": "Right Click (Context Menu)",
+  "@twoFingersTapSubtitle": {
+    "description": "Subtitle for 2-finger tap gesture"
+  },
+  "twoFingersSwipeTitle": "2 Fingers Swipe",
+  "@twoFingersSwipeTitle": {
+    "description": "Title for 2-finger swipe gesture"
+  },
+  "twoFingersSwipeSubtitle": "Smooth 2-Axis Scroll",
+  "@twoFingersSwipeSubtitle": {
+    "description": "Subtitle for 2-finger swipe gesture"
+  },
+  "threeFingersSwipeTitle": "3 Fingers Swipe",
+  "@threeFingersSwipeTitle": {
+    "description": "Title for 3-finger swipe gesture"
+  },
+  "threeFingersSwipeSubtitle": "GNOME Workspaces & Overview",
+  "@threeFingersSwipeSubtitle": {
+    "description": "Subtitle for 3-finger swipe gesture"
+  },
+  "stylusTitle": "Stylus / Apple Pencil",
+  "@stylusTitle": {
+    "description": "Title for active stylus/pencil"
+  },
+  "stylusSubtitle": "Pressure & Inclinative Drawing",
+  "@stylusSubtitle": {
+    "description": "Subtitle for active stylus/pencil"
+  }
+}
