@@ -41,13 +41,31 @@ class _DecoderScreenState extends State<DecoderScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_hasStartedDecoding) {
-      _hasStartedDecoding = true;
-      final mediaQuery = MediaQuery.of(context);
-      final double dpr = mediaQuery.devicePixelRatio;
-      final int physicalW = (mediaQuery.size.width * dpr).round();
-      final int physicalH = (mediaQuery.size.height * dpr).round();
-      _decoderEngine.startDecoding(width: physicalW, height: physicalH);
+      _startDecodingWhenSizeIsKnown();
     }
+  }
+
+  /// Starts native decoding once `MediaQuery` reports a real (non-zero) size.
+  ///
+  /// On some devices `MediaQuery.of(context).size` is still `Size.zero` the first
+  /// time `didChangeDependencies` runs (before the first layout pass completes).
+  /// Starting the native decoder with a 0x0 target size makes `MediaCodec` fail on
+  /// every single frame, which then looks like an endless connect/disconnect loop.
+  void _startDecodingWhenSizeIsKnown() {
+    final mediaQuery = MediaQuery.of(context);
+    final double dpr = mediaQuery.devicePixelRatio;
+    final int physicalW = (mediaQuery.size.width * dpr).round();
+    final int physicalH = (mediaQuery.size.height * dpr).round();
+
+    if (physicalW <= 0 || physicalH <= 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startDecodingWhenSizeIsKnown();
+      });
+      return;
+    }
+
+    _hasStartedDecoding = true;
+    _decoderEngine.startDecoding(width: physicalW, height: physicalH);
   }
 
   /// Reacts to native decoder connection changes: connects/disconnects the input socket

@@ -42,8 +42,11 @@ class MainActivity : FlutterActivity() {
                 "startDecoding" -> {
                     val displayMetrics = resources.displayMetrics
                     val port = call.argument<Int>("port") ?: 6000
-                    val width = call.argument<Int>("width") ?: displayMetrics.widthPixels
-                    val height = call.argument<Int>("height") ?: displayMetrics.heightPixels
+                    // A 0 (not just a missing/null) width or height would configure MediaCodec
+                    // with a degenerate 0x0 format, which fails on every frame. Treat it the
+                    // same as "not provided" and fall back to the display's own resolution.
+                    val width = call.argument<Int>("width")?.takeIf { it > 0 } ?: displayMetrics.widthPixels
+                    val height = call.argument<Int>("height")?.takeIf { it > 0 } ?: displayMetrics.heightPixels
                     stopDecodingInternal()
 
                     val entry = flutterEngine.renderer.createSurfaceTexture()
