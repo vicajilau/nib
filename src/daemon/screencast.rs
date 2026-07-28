@@ -40,6 +40,21 @@ impl ScreencastPipeline {
             .join(" ")
     }
 
+    /// Whether *this* process is actually confined (Flatpak, or a strict/devmode snap).
+    ///
+    /// Deliberately not `ashpd::is_sandboxed()`: that helper treats the mere presence of a
+    /// `SNAP` env var as "running in a snap", but `SNAP*` vars are inherited by every child
+    /// process of a snap-packaged parent (e.g. a terminal opened from a `classic`-confined
+    /// snap like VS Code), regardless of whether *this* process is confined at all. Checking
+    /// `SNAP_CONFINEMENT == strict|devmode` instead reflects the confinement `snap-confine`
+    /// actually applied to this process, which isn't inherited the same way.
+    fn is_running_confined() -> bool {
+        let strictly_confined_snap = std::env::var("SNAP_CONFINEMENT")
+            .map(|v| v == "strict" || v == "devmode")
+            .unwrap_or(false);
+        strictly_confined_snap || std::path::Path::new("/.flatpak-info").exists()
+    }
+
     /// Auto-detects and returns configured H.264 encoder string with zero-latency parameters.
     ///
     /// Hardware encoders are skipped when running sandboxed (Flatpak/Snap): under strict
@@ -48,7 +63,7 @@ impl ScreencastPipeline {
     /// nvh264enc/vah264enc need, so the encoder element loads but silently produces no
     /// output. Software encoding has no such dependency and always works.
     fn detect_encoder_pipeline_string() -> String {
-        let sandboxed = ashpd::is_sandboxed();
+        let sandboxed = Self::is_running_confined();
         if sandboxed {
             tracing::info!(
                 "Running sandboxed: skipping hardware encoders, which need proprietary GPU driver access that isn't reliably available under confinement"
