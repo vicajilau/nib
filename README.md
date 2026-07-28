@@ -68,7 +68,7 @@ graph TD
 
 To deliver a **Zero-Setup "Plug & Play"** user experience:
 
-- **Flatpak Packaging (`dev.victorcarreras.Nib.json`)**: Bundles the lightweight `android-tools` (`adb`) and `usbmuxd` (`iproxy`) utilities directly inside the sandbox container. Users can install Nib with one click from **GNOME Software** without installing the Android SDK.
+- **Flatpak Packaging (`dev.victorcarreras.Nib.json`)**: Bundles the lightweight `android-tools` (`adb`) binary directly inside the sandbox container. Users can install Nib with one click from **GNOME Software** without installing the Android SDK. (`usbmuxd`/`iproxy` for iOS will be added once the iOS transport lands on the host side.)
 - **Wi-Fi / LAN Network Fallback**: Allows direct TCP IP connection over Wi-Fi without requiring USB Debugging or physical cables.
 
 ---

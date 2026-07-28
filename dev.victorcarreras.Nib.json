@@ -1,0 +1,68 @@
+{
+    "app-id": "dev.victorcarreras.Nib",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "50",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "command": "nib",
+    "finish-args": [
+        "--share=network",
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--socket=session-bus",
+        "--device=dri",
+        "--device=all"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin"
+    },
+    "cleanup": [
+        "/include",
+        "/lib/pkgconfig",
+        "/share/doc",
+        "/share/man",
+        "*.la",
+        "*.a"
+    ],
+    "modules": [
+        {
+            "name": "adb",
+            "buildsystem": "simple",
+            "sources": [
+                {
+                    "type": "archive",
+                    "url": "https://dl.google.com/android/repository/platform-tools_r37.0.0-linux.zip",
+                    "sha256": "198ae156ab285fa555987219af237b31102fefe8b9d2bc274708a8d4f2865a07"
+                }
+            ],
+            "build-commands": [
+                "install -D adb /app/bin/adb"
+            ]
+        },
+        {
+            "name": "nib",
+            "buildsystem": "meson",
+            "config-opts": [
+                "-Dbuildtype=release"
+            ],
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/vicajilau/nib.git",
+                    "branch": "main"
+                },
+                "cargo-sources.json",
+                {
+                    "type": "shell",
+                    "commands": [
+                        "mkdir .cargo",
+                        "cp cargo/config .cargo/"
+                    ]
+                }
+            ]
+        }
+    ]
+}
