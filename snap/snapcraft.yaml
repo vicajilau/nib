@@ -44,6 +44,15 @@ parts:
       - curl
       - meson
       - ninja-build
+    # The "gnome" extension's runtime only ships base GStreamer, not encoder
+    # plugins. Without these, every encoder in detect_encoder_pipeline_string()
+    # (nvh264enc/vah264enc/vaapih264enc/x264enc/openh264enc) is missing.
+    stage-packages:
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-plugins-ugly
+      - gstreamer1.0-vaapi
     build-environment:
       - PATH: $HOME/.cargo/bin:$PATH
     override-build: |
