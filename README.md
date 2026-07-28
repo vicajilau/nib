@@ -136,6 +136,12 @@ The Flutter project builds for iOS, but there is no native video decoder yet —
 
 ---
 
+## Code of Conduct
+
+This project follows the [GNOME Code of Conduct](https://conduct.gnome.org/). By participating, you're expected to uphold it — please report any unacceptable behavior to the [Code of Conduct Committee](https://conduct.gnome.org/reporter-guide).
+
+---
+
 ## License
 
 GPL-3.0-or-later. Designed for use with the GNOME desktop.
