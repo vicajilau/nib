@@ -79,3 +79,46 @@ jobs:
 
       - name: Test
         run: flutter test
+
+  flatpak:
+    name: Flatpak manifest
+    runs-on: ubuntu-latest
+    # This image is built FROM ghcr.io/flathub/flatpak-builder-lint, so the linter
+    # binary is already on PATH here too - no separate container/job needed for it.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint manifest (same checks Flathub's own review bot runs)
+        run: flatpak-builder-lint manifest dev.victorcarreras.Nib.json
+
+      # The checked-in manifest pins the "nib" module to the last tagged release, so
+      # Flathub always builds something reproducible. For CI, point that same module
+      # at the commit actually being tested, so a build failure is caught before it's
+      # ever tagged. Uses python3, not jq, since it's guaranteed present here (the
+      # linter itself is written in Python).
+      - name: Point manifest at the commit under test
+        run: |
+          python3 -c "
+          import json
+          with open('dev.victorcarreras.Nib.json') as f:
+              manifest = json.load(f)
+          for module in manifest['modules']:
+              if module.get('name') == 'nib':
+                  module['sources'][0] = {
+                      'type': 'git',
+                      'url': 'https://github.com/${{ github.repository }}.git',
+                      'commit': '${{ github.sha }}',
+                  }
+          with open('dev.victorcarreras.Nib.ci.json', 'w') as f:
+              json.dump(manifest, f, indent=4)
+          "
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: dev.victorcarreras.Nib.ci.json
+          cache-key: flatpak-builder-${{ github.sha }}
+          bundle: nib.flatpak
+          build-bundle: false
