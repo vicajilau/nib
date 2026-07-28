@@ -15,3 +15,7 @@
 
 # GResource compiled binaries
 *.gresource
+
+# Snapcraft Store login credentials (`snapcraft export-login`)
+example
+*.snapcraft-login

@@ -25,23 +25,83 @@ impl ScreencastPipeline {
         }
     }
 
+    /// Builds `key=value` property assignments for only the properties `element_name` actually
+    /// exposes, so a hardcoded property list doesn't break against older/newer plugin builds
+    /// (e.g. bundled in a Flatpak/Snap runtime) that don't support every property.
+    fn supported_properties(element_name: &str, desired: &[(&str, &str)]) -> String {
+        let Ok(element) = gstreamer::ElementFactory::make(element_name).build() else {
+            return String::new();
+        };
+        desired
+            .iter()
+            .filter(|(key, _)| element.has_property(key))
+            .map(|(key, value)| format!("{}={}", key, value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Auto-detects and returns configured H.264 encoder string with zero-latency parameters.
     fn detect_encoder_pipeline_string() -> String {
         if gstreamer::ElementFactory::find("nvh264enc").is_some() {
             tracing::info!("Selected NVIDIA NVENC Hardware Encoder (nvh264enc) [Zero Latency]");
-            "nvh264enc zerolatency=true tune=ultra-low-latency rc-mode=cbr bitrate=12000 gop-size=30 bframes=0".to_string()
+            let props = Self::supported_properties(
+                "nvh264enc",
+                &[
+                    ("zerolatency", "true"),
+                    ("tune", "ultra-low-latency"),
+                    ("rc-mode", "cbr"),
+                    ("bitrate", "12000"),
+                    ("gop-size", "30"),
+                    ("bframes", "0"),
+                ],
+            );
+            format!("nvh264enc {}", props)
         } else if gstreamer::ElementFactory::find("vah264enc").is_some() {
             tracing::info!("Selected VA-API Hardware Encoder (vah264enc)");
-            "vah264enc rate-control=cbr bitrate=12000 gop-size=30 bframes=0".to_string()
+            let props = Self::supported_properties(
+                "vah264enc",
+                &[
+                    ("rate-control", "cbr"),
+                    ("bitrate", "12000"),
+                    ("gop-size", "30"),
+                    ("bframes", "0"),
+                ],
+            );
+            format!("vah264enc {}", props)
         } else if gstreamer::ElementFactory::find("vaapih264enc").is_some() {
             tracing::info!("Selected VA-API Hardware Encoder (vaapih264enc)");
-            "vaapih264enc rate-control=cbr bitrate=12000 keyframe-period=30".to_string()
+            let props = Self::supported_properties(
+                "vaapih264enc",
+                &[
+                    ("rate-control", "cbr"),
+                    ("bitrate", "12000"),
+                    ("keyframe-period", "30"),
+                ],
+            );
+            format!("vaapih264enc {}", props)
         } else if gstreamer::ElementFactory::find("x264enc").is_some() {
             tracing::info!("Selected x264 Software Encoder (x264enc) [Zero Latency]");
-            "x264enc tune=zerolatency speed-preset=ultrafast bitrate=12000 key-int-max=30 bframes=0 threads=4 sync-lookahead=0 rc-lookahead=0".to_string()
+            let props = Self::supported_properties(
+                "x264enc",
+                &[
+                    ("tune", "zerolatency"),
+                    ("speed-preset", "ultrafast"),
+                    ("bitrate", "12000"),
+                    ("key-int-max", "30"),
+                    ("bframes", "0"),
+                    ("threads", "4"),
+                    ("sync-lookahead", "0"),
+                    ("rc-lookahead", "0"),
+                ],
+            );
+            format!("x264enc {}", props)
         } else {
             tracing::info!("Selected OpenH264 Software Encoder (openh264enc)");
-            "openh264enc gop-size=30 bitrate=12000000".to_string()
+            let props = Self::supported_properties(
+                "openh264enc",
+                &[("gop-size", "30"), ("bitrate", "12000000")],
+            );
+            format!("openh264enc {}", props)
         }
     }
 
