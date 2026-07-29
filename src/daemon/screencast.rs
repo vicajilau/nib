@@ -124,21 +124,33 @@ impl ScreencastPipeline {
     /// Constructs GStreamer pipeline string for PipeWire src -> H.264 enc -> AppSink.
     pub fn build_pipeline_desc(&self, node_id: Option<u32>, fd: Option<i32>) -> String {
         let encoder_str = Self::detect_encoder_pipeline_string();
+        // keepalive-time resends the last buffer periodically so a static (damage-driven,
+        // "on demand") screencast source doesn't stall the pipeline. Disabled (0) when
+        // sandboxed: the org.gnome.Platform-bundled pipewiresrc has a known bug where the
+        // *first* buffer is unreffed twice as soon as keepalive-time is nonzero
+        // (`gst_mini_object_unref: assertion 'mini_object != NULL' failed`), corrupting the
+        // only keyframe h264parse's config-interval=1 relies on and leaving the client with a
+        // permanently black decode target. The host's system pipewire (e.g. Ubuntu's
+        // gstreamer1.0-pipewire package) already carries the fix, so cargo run is unaffected.
+        let keepalive = if Self::is_running_confined() { 0 } else { 16 };
         let src = match (fd, node_id) {
             (Some(fd_val), Some(id)) => format!(
-                "pipewiresrc do-timestamp=true always-copy=true keepalive-time=16 fd={} path={}",
-                fd_val, id
+                "pipewiresrc do-timestamp=true always-copy=true keepalive-time={} fd={} path={}",
+                keepalive, fd_val, id
             ),
             (Some(fd_val), None) => format!(
-                "pipewiresrc do-timestamp=true always-copy=true keepalive-time=16 fd={}",
-                fd_val
+                "pipewiresrc do-timestamp=true always-copy=true keepalive-time={} fd={}",
+                keepalive, fd_val
             ),
             (None, Some(id)) => format!(
-                "pipewiresrc do-timestamp=true always-copy=true keepalive-time=16 path={}",
-                id
+                "pipewiresrc do-timestamp=true always-copy=true keepalive-time={} path={}",
+                keepalive, id
             ),
             (None, None) => {
-                "pipewiresrc do-timestamp=true always-copy=true keepalive-time=16".to_string()
+                format!(
+                    "pipewiresrc do-timestamp=true always-copy=true keepalive-time={}",
+                    keepalive
+                )
             }
         };
         let caps = format!(
@@ -161,8 +173,22 @@ impl ScreencastPipeline {
         // modifier negotiation between the two silently produces black frames instead of an
         // error. System memory has no such cross-version dependency, at the cost of an extra
         // copy that videoconvert would need to do anyway.
+        // Different H.264 encoder elements default to different NAL framings: nvh264enc/
+        // vah264enc emit Annex-B (start-code-delimited), but x264enc (the software fallback
+        // used whenever sandboxing forces us off hardware encoders) defaults to AVC
+        // (length-prefixed) instead. The Android client's MediaCodec decoder is fed this
+        // stream directly and only understands Annex-B, so without forcing the format here,
+        // switching encoders silently swaps the wire format and the client can't decode a
+        // single frame - it just never renders anything, with no error on either side.
+        //
+        // Likewise, x264enc auto-negotiates its H.264 *profile* from whatever pixel format
+        // videoconvert hands it, which can land on High 4:4:4 Predictive (profile_idc 244) -
+        // a profile almost no Android hardware MediaCodec decoder implements. nvh264enc
+        // defaults to Baseline (profile_idc 66, universally supported), so this only bites
+        // the sandboxed software-encoder fallback. Forcing baseline here costs negligible
+        // quality at this bitrate/resolution and guarantees the client can always decode it.
         format!(
-            "{} ! video/x-raw ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert n-threads=4 ! videoscale ! {} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! {} ! h264parse config-interval=1 ! appsink name=sink sync=false max-buffers=1 drop=true",
+            "{} ! video/x-raw ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert n-threads=4 ! videoscale ! {} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! {} ! video/x-h264,profile=baseline ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false max-buffers=1 drop=true",
             src, caps, encoder_str
         )
     }
