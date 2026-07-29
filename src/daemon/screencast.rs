@@ -145,6 +145,16 @@ impl ScreencastPipeline {
             "video/x-raw,width={},height={}",
             self.config.width, self.config.height
         );
+        // No framerate constraint anywhere in this pipeline: the portal's screencast node is
+        // damage-driven (its actual framerate is 0/1, "on demand"). pipewiresrc negotiates by
+        // querying the *entire* downstream chain's caps transitively, so a fixed framerate
+        // constraint anywhere - even several elements downstream, after videoconvert/videoscale
+        // - still fails negotiation outright ("stream error: no more input formats"), because
+        // PipeWire can't resolve a fixed clocked rate against a node that only ever offers
+        // 0/1. Confirmed by two separate real failed runs. `self.config.fps` (the UI's 60/120/30
+        // selector) can't currently be honored this way; do-timestamp=true stamps real
+        // wall-clock PTS on each buffer regardless of the nominal declared rate.
+        //
         // The plain (no memory-feature) "video/x-raw" caps right after pipewiresrc rule out
         // DMA-BUF for this negotiation, forcing system-memory buffers. Under sandboxing the
         // Flatpak-bundled Mesa version doesn't match the host compositor's, and DMA-BUF
