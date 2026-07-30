@@ -230,6 +230,83 @@ impl InputInjector {
     }
 }
 
+/// Appends `event` to `out`, merging it into the previous entry when both describe the same
+/// kind of continuous motion (scroll, touch/stylus drag, swipe). Without this, a burst of
+/// per-frame delta packets - which a fast 2-finger scroll can emit in the hundreds within a
+/// single socket read - would each cause its own awaited portal D-Bus round trip, falling
+/// further and further behind the client in real time; the desktop then keeps "scrolling" long
+/// after the fingers lifted, which reads as the whole session freezing. Coalescing collapses
+/// each such burst to at most one call per motion axis before dispatch.
+fn push_coalesced(out: &mut Vec<InputEvent>, event: InputEvent) {
+    let coalesced = match out.last_mut() {
+        Some(InputEvent::Scroll { dx, dy }) => {
+            if let InputEvent::Scroll { dx: ndx, dy: ndy } = &event {
+                *dx += ndx;
+                *dy += ndy;
+                true
+            } else {
+                false
+            }
+        }
+        Some(InputEvent::SwipeGesture { dx, dy }) => {
+            if let InputEvent::SwipeGesture { dx: ndx, dy: ndy } = &event {
+                *dx += ndx;
+                *dy += ndy;
+                true
+            } else {
+                false
+            }
+        }
+        Some(InputEvent::TouchMove { x, y, id }) => {
+            if let InputEvent::TouchMove {
+                x: nx,
+                y: ny,
+                id: nid,
+            } = &event
+            {
+                if *id == *nid {
+                    *x = *nx;
+                    *y = *ny;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        Some(InputEvent::StylusMove {
+            x,
+            y,
+            pressure,
+            tilt_x,
+            tilt_y,
+        }) => {
+            if let InputEvent::StylusMove {
+                x: nx,
+                y: ny,
+                pressure: np,
+                tilt_x: ntx,
+                tilt_y: nty,
+            } = &event
+            {
+                *x = *nx;
+                *y = *ny;
+                *pressure = *np;
+                *tilt_x = *ntx;
+                *tilt_y = *nty;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+    if !coalesced {
+        out.push(event);
+    }
+}
+
 /// Parses a 20-byte binary packet starting with magic header `0x53`.
 ///
 /// ### Packet Layout (20 Bytes Little-Endian)
@@ -344,8 +421,8 @@ impl InputServer {
                                 let mut stop_rx_client = stop_rx.clone();
 
                                 tokio::spawn(async move {
-                                    let mut buffer = Vec::with_capacity(1024);
-                                    let mut temp_buf = [0u8; 512];
+                                    let mut buffer = Vec::with_capacity(4096);
+                                    let mut temp_buf = [0u8; 4096];
 
                                     loop {
                                         tokio::select! {
@@ -361,6 +438,11 @@ impl InputServer {
                                                     Ok(n) => {
                                                         buffer.extend_from_slice(&temp_buf[..n]);
 
+                                                        // Parse every complete packet already buffered before dispatching
+                                                        // any of them, coalescing runs of continuous-motion events (see
+                                                        // `push_coalesced`) so a burst of queued packets costs at most one
+                                                        // awaited portal call per motion axis instead of one per packet.
+                                                        let mut batch: Vec<InputEvent> = Vec::new();
                                                         while !buffer.is_empty() {
                                                             if buffer[0] != BINARY_MAGIC_HEADER {
                                                                 tracing::warn!(
@@ -378,10 +460,14 @@ impl InputServer {
                                                             buffer.drain(..20);
 
                                                             if let Some(event) = parse_binary_packet(&pkt_bytes) {
-                                                                injector_clone.process_event(event).await;
+                                                                push_coalesced(&mut batch, event);
                                                             } else {
                                                                 tracing::warn!("Invalid binary packet received");
                                                             }
+                                                        }
+
+                                                        for event in batch {
+                                                            injector_clone.process_event(event).await;
                                                         }
                                                     }
                                                     Err(e) => {
@@ -486,5 +572,118 @@ mod tests {
         let mut pkt = [0u8; 20];
         pkt[0] = 0x00; // Invalid magic
         assert_eq!(parse_binary_packet(&pkt), None);
+    }
+
+    #[test]
+    fn push_coalesced_merges_a_burst_of_scroll_events_into_one() {
+        // Regression test: a fast 2-finger scroll can queue up hundreds of Scroll packets in
+        // a single socket read; each used to trigger its own awaited portal call, so the
+        // desktop kept scrolling long after the fingers lifted once the client outran the
+        // daemon. Coalescing must collapse a run of Scroll events into a single summed one.
+        let mut batch = Vec::new();
+        for _ in 0..300 {
+            push_coalesced(&mut batch, InputEvent::Scroll { dx: 1.0, dy: -0.5 });
+        }
+        assert_eq!(
+            batch,
+            vec![InputEvent::Scroll {
+                dx: 300.0,
+                dy: -150.0
+            }]
+        );
+    }
+
+    #[test]
+    fn push_coalesced_keeps_latest_touch_move_position_per_slot() {
+        let mut batch = Vec::new();
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchMove {
+                x: 0.1,
+                y: 0.1,
+                id: 0,
+            },
+        );
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchMove {
+                x: 0.2,
+                y: 0.2,
+                id: 0,
+            },
+        );
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchMove {
+                x: 0.9,
+                y: 0.9,
+                id: 0,
+            },
+        );
+        assert_eq!(
+            batch,
+            vec![InputEvent::TouchMove {
+                x: 0.9,
+                y: 0.9,
+                id: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn push_coalesced_does_not_merge_across_different_touch_slots_or_event_kinds() {
+        let mut batch = Vec::new();
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchMove {
+                x: 0.1,
+                y: 0.1,
+                id: 0,
+            },
+        );
+        // A different finger's move must not be merged into slot 0's entry.
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchMove {
+                x: 0.4,
+                y: 0.4,
+                id: 1,
+            },
+        );
+        // A TouchDown breaks the run even though it shares the Scroll-adjacent position;
+        // down/up events must never be dropped or merged away.
+        push_coalesced(&mut batch, InputEvent::Scroll { dx: 1.0, dy: 1.0 });
+        push_coalesced(
+            &mut batch,
+            InputEvent::TouchDown {
+                x: 0.5,
+                y: 0.5,
+                id: 2,
+            },
+        );
+        push_coalesced(&mut batch, InputEvent::Scroll { dx: 2.0, dy: 2.0 });
+
+        assert_eq!(
+            batch,
+            vec![
+                InputEvent::TouchMove {
+                    x: 0.1,
+                    y: 0.1,
+                    id: 0
+                },
+                InputEvent::TouchMove {
+                    x: 0.4,
+                    y: 0.4,
+                    id: 1
+                },
+                InputEvent::Scroll { dx: 1.0, dy: 1.0 },
+                InputEvent::TouchDown {
+                    x: 0.5,
+                    y: 0.5,
+                    id: 2
+                },
+                InputEvent::Scroll { dx: 2.0, dy: 2.0 },
+            ]
+        );
     }
 }

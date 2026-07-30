@@ -64,9 +64,10 @@ pub struct NibDaemon {
     vm_manager: Option<Arc<Mutex<VirtualMonitorManager>>>,
     pipeline: Option<ScreencastPipeline>,
     input_server: Option<InputServer>,
-    /// Forces periodic repaints on an `Extend`-mode virtual monitor so the screencast's
-    /// embedded cursor doesn't freeze on an otherwise-idle desktop. Lives here (not on
-    /// `VirtualMonitorManager`) because it wraps a GTK window, which isn't `Send`, while
+    /// Forces periodic repaints on the captured monitor so the screencast doesn't stall on an
+    /// otherwise-idle desktop driven only by injected input (see `CursorKeepaliveOverlay`).
+    /// Lives here (not on `VirtualMonitorManager`) because it wraps a GTK window, which isn't
+    /// `Send`, while
     /// `VirtualMonitorManager` is shared into the input server's `tokio::spawn` task and must
     /// stay thread-safe; `NibDaemon` itself never leaves the GTK main thread.
     cursor_keepalive: Option<CursorKeepaliveOverlay>,
@@ -140,9 +141,11 @@ impl NibDaemon {
             self.config.display_mode = resolved_mode;
         }
 
-        if self.config.display_mode == DisplayMode::Extend {
-            self.cursor_keepalive = CursorKeepaliveOverlay::start().await;
-        }
+        // Not just an `Extend`-mode workaround: on at least this NVIDIA setup, `Mirror` mode
+        // streams driven purely by `RemoteDesktop`-injected input (as opposed to genuine
+        // hardware input) go just as stale without it. See `CursorKeepaliveOverlay` for why.
+        self.cursor_keepalive =
+            CursorKeepaliveOverlay::start(self.config.display_mode, vm_mgr.stream_geometry()).await;
 
         let vm_mgr_arc = Arc::new(Mutex::new(vm_mgr));
         self.vm_manager = Some(vm_mgr_arc.clone());

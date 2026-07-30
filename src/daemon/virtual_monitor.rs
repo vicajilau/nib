@@ -154,6 +154,20 @@ impl VirtualMonitorManager {
         }
     }
 
+    /// Reports the captured stream's logical geometry `(x, y, width, height)` in the
+    /// compositor's global coordinate space, as last reported by the portal (see
+    /// `create_display`). Used to locate the corresponding `GdkMonitor` for
+    /// `CursorKeepaliveOverlay`, which needs to target whichever output is actually being
+    /// captured - the mirrored physical monitor, or the virtual one - rather than assuming one.
+    pub fn stream_geometry(&self) -> (i32, i32, i32, i32) {
+        (
+            self.x_offset.load(Ordering::SeqCst),
+            self.y_offset.load(Ordering::SeqCst),
+            self.actual_width.load(Ordering::SeqCst),
+            self.actual_height.load(Ordering::SeqCst),
+        )
+    }
+
     /// Requests GNOME Mutter / Portal to capture ScreenCast display with explicit PipeWire Remote FD and Input Injection.
     /// Returns the resolved node ID, PipeWire FD, and the `DisplayMode` actually granted by the
     /// compositor (see the note on `SourceType` reconciliation below), which may differ from the
