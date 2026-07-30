@@ -1,3 +1,4 @@
+use crate::daemon::DaemonError;
 use std::process::Command;
 use tracing;
 
@@ -44,7 +45,7 @@ impl AdbTransportManager {
         device_serial: Option<&str>,
         local_port: u16,
         remote_port: u16,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         let adb_bin = Self::find_adb_path();
         tracing::info!("Using ADB binary: {}", adb_bin);
         tracing::info!(
@@ -74,12 +75,12 @@ impl AdbTransportManager {
                 } else {
                     let err = String::from_utf8_lossy(&out.stderr);
                     tracing::error!("ADB reverse error: {}", err);
-                    Err(format!("ADB reverse failed: {}", err))
+                    Err(DaemonError::other(format!("ADB reverse failed: {}", err)))
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to execute adb binary ({}): {}", adb_bin, e);
-                Err(e.to_string())
+                Err(DaemonError::from(e))
             }
         }
     }

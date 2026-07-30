@@ -1,4 +1,5 @@
 use crate::daemon::virtual_monitor::VirtualMonitorManager;
+use crate::daemon::DaemonError;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -59,7 +60,7 @@ impl InputInjector {
         screen_width: u32,
         screen_height: u32,
         vm_manager: Option<Arc<Mutex<VirtualMonitorManager>>>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, DaemonError> {
         tracing::info!(
             "Initializing Virtual Input Injector (Bounds: {}x{})",
             screen_width,
@@ -486,5 +487,4 @@ mod tests {
         pkt[0] = 0x00; // Invalid magic
         assert_eq!(parse_binary_packet(&pkt), None);
     }
-
 }

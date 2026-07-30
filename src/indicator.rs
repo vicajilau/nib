@@ -159,11 +159,15 @@ pub struct IndicatorManager {
 
 impl IndicatorManager {
     /// Creates and spawns a new background system tray indicator instance.
+    ///
+    /// Returns `None` (logging an error) if the tray couldn't be spawned - e.g. no
+    /// StatusNotifierItem host is running on the desktop. The app remains fully usable without
+    /// a tray icon, so this is not a fatal condition.
     pub fn new(
         show_window_cb: Arc<dyn Fn() + Send + Sync>,
         toggle_device_cb: Arc<dyn Fn(String) + Send + Sync>,
         quit_cb: Arc<dyn Fn() + Send + Sync>,
-    ) -> Self {
+    ) -> Option<Self> {
         let tray = NibTray {
             devices: Vec::new(),
             show_window_cb,
@@ -174,12 +178,13 @@ impl IndicatorManager {
         // Avoid requesting the well-known `org.kde.StatusNotifierItem-*` D-Bus name: sandboxes
         // like Flatpak either deny it outright or only grant narrow, explicit `--talk-name`
         // permissions. The connection's own unique name works just as well for registration.
-        let handle = tray
-            .disable_dbus_name(true)
-            .spawn()
-            .unwrap_or_else(|e| panic!("Failed to spawn top bar indicator tray: {}", e));
-
-        Self { handle }
+        match tray.disable_dbus_name(true).spawn() {
+            Ok(handle) => Some(Self { handle }),
+            Err(e) => {
+                tracing::error!("Failed to spawn top bar indicator tray: {}", e);
+                None
+            }
+        }
     }
 
     /// Dynamically updates the active list of connected devices in the system tray context menu.

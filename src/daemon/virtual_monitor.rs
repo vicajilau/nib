@@ -1,3 +1,4 @@
+use crate::daemon::DaemonError;
 use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::{PersistMode, Session};
@@ -78,7 +79,7 @@ pub struct VirtualMonitorManager {
 
 impl VirtualMonitorManager {
     /// Creates a new, unconnected `VirtualMonitorManager` with default mirror-mode dimensions.
-    pub async fn new() -> Result<Self, String> {
+    pub async fn new() -> Result<Self, DaemonError> {
         Ok(Self {
             node_id: None,
             pipewire_fd: None,
@@ -123,7 +124,7 @@ impl VirtualMonitorManager {
         mode: DisplayMode,
         width: u32,
         height: u32,
-    ) -> Result<(Option<u32>, Option<i32>, DisplayMode), String> {
+    ) -> Result<(Option<u32>, Option<i32>, DisplayMode), DaemonError> {
         self.display_mode = mode;
         self.width = if width > 0 { width } else { 2560 };
         self.height = if height > 0 { height } else { 1600 };
@@ -137,11 +138,8 @@ impl VirtualMonitorManager {
             self.height
         );
 
-        let rd_proxy = RemoteDesktop::new().await.map_err(|e| e.to_string())?;
-        let session = rd_proxy
-            .create_session(Default::default())
-            .await
-            .map_err(|e| e.to_string())?;
+        let rd_proxy = RemoteDesktop::new().await?;
+        let session = rd_proxy.create_session(Default::default()).await?;
 
         // 1. Select Input Devices (Pointer, Touchscreen & Keyboard)
         rd_proxy
@@ -151,8 +149,7 @@ impl VirtualMonitorManager {
                     DeviceType::Pointer | DeviceType::Touchscreen | DeviceType::Keyboard,
                 ),
             )
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
         // 2. Select Screencast Sources
         // Restricted to the type matching nib's own Mirror/Extend selection: the native picker
@@ -163,7 +160,7 @@ impl VirtualMonitorManager {
             DisplayMode::Mirror => SourceType::Monitor.into(),
             DisplayMode::Extend => SourceType::Virtual.into(),
         };
-        let sc_proxy = Screencast::new().await.map_err(|e| e.to_string())?;
+        let sc_proxy = Screencast::new().await?;
         sc_proxy
             .select_sources(
                 &session,
@@ -173,21 +170,17 @@ impl VirtualMonitorManager {
                     .set_multiple(false)
                     .set_persist_mode(PersistMode::DoNot),
             )
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
         // 3. Start combined RemoteDesktop session
         let response = rd_proxy
             .start(&session, None, Default::default())
-            .await
-            .map_err(|e| e.to_string())?
-            .response()
-            .map_err(|e| e.to_string())?;
+            .await?
+            .response()?;
 
         let fd = sc_proxy
             .open_pipe_wire_remote(&session, Default::default())
-            .await
-            .map_err(|e| format!("Failed to open PipeWire remote fd: {}", e))?;
+            .await?;
 
         let raw_fd = fd.as_raw_fd();
         self.pipewire_fd = Some(fd);
@@ -272,7 +265,7 @@ impl VirtualMonitorManager {
         &self,
         norm_x: f64,
         norm_y: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         let norm_x = norm_x.clamp(0.0, 1.0);
         let norm_y = norm_y.clamp(0.0, 1.0);
@@ -285,7 +278,7 @@ impl VirtualMonitorManager {
     }
 
     /// Internal absolute motion handler for screen mirroring mode.
-    async fn notify_motion_mirror(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
+    async fn notify_motion_mirror(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
         let w = self.actual_width.load(Ordering::SeqCst) as f64;
         let h = self.actual_height.load(Ordering::SeqCst) as f64;
         let px = (norm_x * w).clamp(0.0, w);
@@ -318,7 +311,7 @@ impl VirtualMonitorManager {
     }
 
     /// Internal absolute motion handler for extended desktop display mode.
-    async fn notify_motion_extend(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
+    async fn notify_motion_extend(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
         let w = self.actual_width.load(Ordering::SeqCst) as f64;
         let h = self.actual_height.load(Ordering::SeqCst) as f64;
         let px = (norm_x * w).clamp(0.0, w);
@@ -331,8 +324,14 @@ impl VirtualMonitorManager {
         let abs_y = y_off + py;
 
         let (dx, dy) = {
-            let mut lx = self.last_abs_x.lock().unwrap();
-            let mut ly = self.last_abs_y.lock().unwrap();
+            let mut lx = self
+                .last_abs_x
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut ly = self
+                .last_abs_y
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dx = if *lx == 0.0 { 0.0 } else { abs_x - *lx };
             let dy = if *ly == 0.0 { 0.0 } else { abs_y - *ly };
             *lx = abs_x;
@@ -356,7 +355,9 @@ impl VirtualMonitorManager {
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("EXTEND MOTION: stream-relative attempt (node_id, local px/py) succeeded");
+                    tracing::info!(
+                        "EXTEND MOTION: stream-relative attempt (node_id, local px/py) succeeded"
+                    );
                     return Ok(());
                 }
                 Err(e) => tracing::info!("EXTEND MOTION: stream-relative attempt failed: {}", e),
@@ -379,7 +380,9 @@ impl VirtualMonitorManager {
                 .await
             {
                 Ok(()) => {
-                    tracing::info!("EXTEND MOTION: stream 0 + global abs_x/abs_y attempt succeeded");
+                    tracing::info!(
+                        "EXTEND MOTION: stream 0 + global abs_x/abs_y attempt succeeded"
+                    );
                     return Ok(());
                 }
                 Err(e) => tracing::info!(
@@ -398,7 +401,7 @@ impl VirtualMonitorManager {
     }
 
     /// Injects a contextual right-click event at normalized screen coordinates.
-    pub async fn notify_right_click(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
+    pub async fn notify_right_click(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         let norm_x = norm_x.clamp(0.0, 1.0);
         let norm_y = norm_y.clamp(0.0, 1.0);
@@ -423,7 +426,7 @@ impl VirtualMonitorManager {
     }
 
     /// Injects a GNOME Overview toggle command using Super key keycode simulation.
-    pub async fn notify_overview_toggle(&self) -> Result<(), String> {
+    pub async fn notify_overview_toggle(&self) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             tracing::info!("Injecting GNOME Overview Gesture (Super Key 125)...");
@@ -441,7 +444,7 @@ impl VirtualMonitorManager {
     }
 
     /// Injects scroll axis motion deltas for 2-axis page scrolling.
-    pub async fn notify_scroll(&self, dx: f64, dy: f64) -> Result<(), String> {
+    pub async fn notify_scroll(&self, dx: f64, dy: f64) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             let _ = rd
@@ -471,7 +474,7 @@ impl VirtualMonitorManager {
         slot: u32,
         norm_x: f64,
         norm_y: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         let (px, py) = self.local_pixel(norm_x, norm_y);
         let node_id = self.node_id.unwrap_or(0);
@@ -500,7 +503,7 @@ impl VirtualMonitorManager {
         slot: u32,
         norm_x: f64,
         norm_y: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         let (px, py) = self.local_pixel(norm_x, norm_y);
         let node_id = self.node_id.unwrap_or(0);
@@ -517,14 +520,11 @@ impl VirtualMonitorManager {
     }
 
     /// Injects a touch release event via `NotifyTouchUp`.
-    pub async fn notify_touch_up(&self, slot: u32) -> Result<(), String> {
+    pub async fn notify_touch_up(&self, slot: u32) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             tracing::info!("TOUCH UP slot {}", slot);
-            if let Err(e) = rd
-                .notify_touch_up(session, slot, Default::default())
-                .await
-            {
+            if let Err(e) = rd.notify_touch_up(session, slot, Default::default()).await {
                 tracing::error!("notify_touch_up error on slot {}: {}", slot, e);
             }
         }
@@ -532,16 +532,17 @@ impl VirtualMonitorManager {
     }
 
     /// Injects a mouse pointer button event (pressed or released) via the RemoteDesktop portal.
-    pub async fn notify_pointer_button(&self, button: i32, state: KeyState) -> Result<(), String> {
+    pub async fn notify_pointer_button(
+        &self,
+        button: i32,
+        state: KeyState,
+    ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             tracing::info!("Injecting Pointer Button: {} {:?}", button, state);
             rd.notify_pointer_button(session, button, state, Default::default())
                 .await
-                .map_err(|e| {
-                    tracing::error!("Portal notify_pointer_button error: {}", e);
-                    e.to_string()
-                })?;
+                .inspect_err(|e| tracing::error!("Portal notify_pointer_button error: {}", e))?;
         } else {
             tracing::warn!("notify_pointer_button skipped: rd or session missing!");
         }
@@ -562,7 +563,7 @@ impl VirtualMonitorManager {
         pressure: f32,
         tilt_x: f32,
         tilt_y: f32,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         tracing::info!(
             "STYLUS DOWN -> Norm ({:.4}, {:.4}) Pressure: {:.2} Tilt: ({:.1}, {:.1})",
             norm_x,
@@ -583,7 +584,7 @@ impl VirtualMonitorManager {
         pressure: f32,
         tilt_x: f32,
         tilt_y: f32,
-    ) -> Result<(), String> {
+    ) -> Result<(), DaemonError> {
         tracing::trace!(
             "STYLUS MOVE -> Norm ({:.4}, {:.4}) Pressure: {:.2} Tilt: ({:.1}, {:.1})",
             norm_x,
@@ -596,14 +597,14 @@ impl VirtualMonitorManager {
     }
 
     /// Injects active stylus lift event via the pointer API.
-    pub async fn notify_stylus_up(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
+    pub async fn notify_stylus_up(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
         tracing::info!("STYLUS UP -> Norm ({:.4}, {:.4})", norm_x, norm_y);
         self.notify_pointer_button(272, KeyState::Released).await?;
         self.notify_pointer_motion_absolute(norm_x, norm_y).await
     }
 
     /// Handles continuous 1:1 swipe gestures and triggers overview toggle when threshold is met.
-    pub async fn notify_swipe_gesture(&self, _dx: f64, dy: f64) -> Result<(), String> {
+    pub async fn notify_swipe_gesture(&self, _dx: f64, dy: f64) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         tracing::info!("SWIPE GESTURE -> dy: {:.2}", dy);
         if dy.abs() > 30.0 {
@@ -614,10 +615,8 @@ impl VirtualMonitorManager {
 
     /// Queries Mutter's `DisplayConfig` D-Bus interface to locate the created virtual monitor
     /// (in `Extend` mode) and cache its logical offset and resolution for coordinate mapping.
-    pub async fn align_virtual_monitor(&self) -> Result<(), String> {
-        let connection = zbus::Connection::session()
-            .await
-            .map_err(|e| format!("Failed to connect to session bus: {}", e))?;
+    pub async fn align_virtual_monitor(&self) -> Result<(), DaemonError> {
+        let connection = zbus::Connection::session().await?;
 
         let reply = connection
             .call_method(
@@ -627,8 +626,7 @@ impl VirtualMonitorManager {
                 "GetCurrentState",
                 &(),
             )
-            .await
-            .map_err(|e| format!("Failed to call GetCurrentState: {}", e))?;
+            .await?;
 
         let body = reply.body();
         let (serial, monitors, logical_monitors, _props): (
@@ -636,13 +634,10 @@ impl VirtualMonitorManager {
             Vec<DisplayMonitor>,
             Vec<LogicalMonitor>,
             std::collections::HashMap<String, OwnedValue>,
-        ) = match body.deserialize() {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to deserialize GetCurrentState D-Bus reply: {}", e);
-                return Err(format!("Failed to deserialize state: {}", e));
-            }
-        };
+        ) = body.deserialize().map_err(|e| {
+            tracing::error!("Failed to deserialize GetCurrentState D-Bus reply: {}", e);
+            DaemonError::other(format!("Failed to deserialize state: {}", e))
+        })?;
 
         tracing::info!(
             "D-Bus DisplayConfig state: Serial {}, logical monitors count: {}",
@@ -710,7 +705,7 @@ impl VirtualMonitorManager {
 
     /// Tears down the portal session, resetting the cursor to the primary display origin
     /// if the virtual/mirrored display was last touched.
-    pub async fn destroy_display(&mut self) -> Result<(), String> {
+    pub async fn destroy_display(&mut self) -> Result<(), DaemonError> {
         tracing::info!("Destroying Display Session");
         if self.was_last_input_on_virtual.swap(false, Ordering::SeqCst) {
             tracing::info!(
@@ -727,5 +722,79 @@ impl VirtualMonitorManager {
         self.x_offset.store(0, Ordering::SeqCst);
         self.y_offset.store(0, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_pixel_scales_normalized_coordinates_to_resolution() {
+        let mut mgr = VirtualMonitorManager::new().await.unwrap();
+        mgr.update_target_resolution(1000, 500);
+
+        assert_eq!(mgr.local_pixel(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(mgr.local_pixel(1.0, 1.0), (1000.0, 500.0));
+        assert_eq!(mgr.local_pixel(0.5, 0.5), (500.0, 250.0));
+    }
+
+    #[tokio::test]
+    async fn local_pixel_clamps_out_of_range_coordinates() {
+        let mut mgr = VirtualMonitorManager::new().await.unwrap();
+        mgr.update_target_resolution(1000, 500);
+
+        assert_eq!(mgr.local_pixel(-1.0, 2.0), (0.0, 500.0));
+    }
+
+    #[tokio::test]
+    async fn update_target_resolution_ignores_zero_dimensions() {
+        let mut mgr = VirtualMonitorManager::new().await.unwrap();
+        mgr.update_target_resolution(800, 600);
+
+        // A zero-valued dimension (seen from a malformed or premature handshake packet) must
+        // not clobber the last good resolution.
+        mgr.update_target_resolution(0, 0);
+        assert_eq!(mgr.local_pixel(1.0, 1.0), (800.0, 600.0));
+    }
+
+    #[tokio::test]
+    async fn notify_methods_are_safe_noops_without_an_active_session() {
+        // Before `create_display` succeeds, `remote_desktop`/`session` are `None`. Every notify_*
+        // method must degrade to a no-op `Ok(())` rather than panicking (e.g. on an `.unwrap()`
+        // of the missing session) - this can be reached in practice if input arrives while a
+        // stream is tearing down.
+        let mgr = VirtualMonitorManager::new().await.unwrap();
+        assert!(mgr.notify_pointer_motion_absolute(0.5, 0.5).await.is_ok());
+        assert!(mgr.notify_right_click(0.5, 0.5).await.is_ok());
+        assert!(mgr.notify_overview_toggle().await.is_ok());
+        assert!(mgr.notify_scroll(1.0, 1.0).await.is_ok());
+        assert!(mgr.notify_touch_down(0, 0.5, 0.5).await.is_ok());
+        assert!(mgr.notify_touch_motion(0, 0.5, 0.5).await.is_ok());
+        assert!(mgr.notify_touch_up(0).await.is_ok());
+        assert!(mgr.notify_swipe_gesture(0.0, 0.0).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn notify_touch_down_sets_last_input_on_virtual() {
+        let mgr = VirtualMonitorManager::new().await.unwrap();
+        assert!(!mgr.was_last_input_on_virtual.load(Ordering::SeqCst));
+        let _ = mgr.notify_touch_down(0, 0.5, 0.5).await;
+        assert!(mgr.was_last_input_on_virtual.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn daemon_error_is_cancelled_only_for_a_cancelled_portal_response() {
+        let cancelled = DaemonError::from(ashpd::Error::Response(
+            ashpd::desktop::ResponseError::Cancelled,
+        ));
+        assert!(cancelled.is_cancelled());
+
+        let other_portal_error =
+            DaemonError::from(ashpd::Error::Response(ashpd::desktop::ResponseError::Other));
+        assert!(!other_portal_error.is_cancelled());
+
+        let generic_error = DaemonError::other("something else went wrong");
+        assert!(!generic_error.is_cancelled());
     }
 }

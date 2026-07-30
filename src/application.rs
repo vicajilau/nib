@@ -127,8 +127,9 @@ impl NibApplication {
             });
         });
 
-        let mgr = Arc::new(IndicatorManager::new(show_cb, toggle_device_cb, quit_cb));
-        self.imp().indicator.replace(Some(mgr));
+        if let Some(mgr) = IndicatorManager::new(show_cb, toggle_device_cb, quit_cb) {
+            self.imp().indicator.replace(Some(Arc::new(mgr)));
+        }
     }
 
     /// Returns an atomic handle to the system tray indicator manager if active.
@@ -163,7 +164,10 @@ impl NibApplication {
 
     /// Displays the native Libadwaita About dialog.
     fn show_about(&self) {
-        let window = self.active_window().unwrap();
+        let Some(window) = self.active_window() else {
+            tracing::warn!("show_about: no active window to attach the About dialog to");
+            return;
+        };
         let dialog = adw::AboutDialog::builder()
             .application_name("Nib")
             .application_icon(config::APP_ID)

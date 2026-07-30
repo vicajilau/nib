@@ -1,5 +1,6 @@
 pub mod adb_transport;
 pub mod cursor_keepalive;
+pub mod error;
 pub mod input_injector;
 pub mod screencast;
 pub mod virtual_monitor;
@@ -9,9 +10,15 @@ use tokio::sync::Mutex;
 
 use adb_transport::AdbTransportManager;
 use cursor_keepalive::CursorKeepaliveOverlay;
+pub use error::DaemonError;
 use input_injector::{InputInjector, InputServer};
 use screencast::ScreencastPipeline;
 use virtual_monitor::{DisplayMode, VirtualMonitorManager};
+
+/// Android-side ports that `nib`'s companion app listens on; `adb reverse` maps these to the
+/// per-device local ports chosen in `StreamConfig`.
+const DEVICE_VIDEO_PORT: u16 = 6000;
+const DEVICE_INPUT_PORT: u16 = 6001;
 
 /// User-configurable parameters describing how a single device stream should be captured,
 /// encoded, and transported.
@@ -44,8 +51,8 @@ impl Default for StreamConfig {
             encoder: "vaapi".to_string(),
             display_mode: DisplayMode::Extend,
             device_serial: None,
-            video_port: 6000,
-            input_port: 6001,
+            video_port: DEVICE_VIDEO_PORT,
+            input_port: DEVICE_INPUT_PORT,
         }
     }
 }
@@ -82,7 +89,7 @@ impl NibDaemon {
 
     /// Starts the full streaming pipeline: ADB port forwarding, portal display session
     /// creation, input server, and GStreamer screencast, in that order.
-    pub async fn start_stream(&mut self) -> Result<(), String> {
+    pub async fn start_stream(&mut self) -> Result<(), DaemonError> {
         let video_port = self.config.video_port;
         let input_port = self.config.input_port;
 
@@ -97,16 +104,17 @@ impl NibDaemon {
             self.config.fps
         );
 
-        // 1. ADB Port Forwarding: Map Android ports 6000 (video) & 6001 (input) to unique PC local ports
+        // 1. ADB Port Forwarding: map the device's fixed video/input ports to this stream's
+        // unique local PC ports.
         let _ = AdbTransportManager::setup_port_forwarding(
             self.config.device_serial.as_deref(),
             video_port,
-            6000,
+            DEVICE_VIDEO_PORT,
         );
         let _ = AdbTransportManager::setup_port_forwarding(
             self.config.device_serial.as_deref(),
             input_port,
-            6001,
+            DEVICE_INPUT_PORT,
         );
 
         // 2. Mutter / Freedesktop Portal Display Session

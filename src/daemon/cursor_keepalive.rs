@@ -103,7 +103,9 @@ impl CursorKeepaliveOverlay {
         let monitors = display.monitors();
         let mut seen = Vec::new();
         for i in 0..monitors.n_items() {
-            let Some(monitor) = monitors.item(i).and_then(|o| o.downcast::<gdk::Monitor>().ok())
+            let Some(monitor) = monitors
+                .item(i)
+                .and_then(|o| o.downcast::<gdk::Monitor>().ok())
             else {
                 continue;
             };

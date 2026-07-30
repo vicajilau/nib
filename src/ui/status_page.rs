@@ -216,7 +216,7 @@ impl ConnectionStatusPage {
                 }
                 Err(e) => {
                     if let Some(page) = self_weak.upgrade() {
-                        if e.contains("cancelled") || e.contains("Cancelled") {
+                        if e.is_cancelled() {
                             tracing::info!(
                                 "Stream request cancelled by user for device {}",
                                 serial_string

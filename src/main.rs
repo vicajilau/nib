@@ -1,3 +1,8 @@
+//! Nib streams an Android device's display to the desktop as a GNOME virtual monitor (or
+//! mirrors an existing one), over PipeWire/GStreamer for video and a binary TCP protocol for
+//! touch/stylus input, both tunneled through `adb reverse`. See `daemon` for the streaming
+//! pipeline and `ui`/`window` for the GTK4/Libadwaita front end.
+
 mod application;
 mod config;
 mod daemon;
@@ -7,22 +12,15 @@ mod ui;
 mod window;
 
 use application::NibApplication;
-use gettextrs::LocaleCategory;
 use gtk4::prelude::ApplicationExtManual;
 
 /// Main entry point for the Nib host application.
 ///
-/// Initializes logging, sets up internationalization (i18n) gettext domains,
-/// instantiates the GTK4/Libadwaita application, and executes the event loop.
+/// Initializes logging, instantiates the GTK4/Libadwaita application, and executes the event
+/// loop. UI string translation is handled by `crate::i18n`, not gettext (see its doc comment).
 fn main() -> glib::ExitCode {
     // Set up logging
     tracing_subscriber::fmt::init();
-
-    // Set up i18n
-    gettextrs::setlocale(LocaleCategory::LcAll, "");
-    gettextrs::bindtextdomain(config::GETTEXT_PACKAGE, config::LOCALEDIR)
-        .expect("Failed to bind text domain");
-    gettextrs::textdomain(config::GETTEXT_PACKAGE).expect("Failed to set text domain");
 
     tracing::info!("Starting Nib v{}", config::VERSION);
 

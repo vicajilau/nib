@@ -1,4 +1,4 @@
-use crate::daemon::StreamConfig;
+use crate::daemon::{DaemonError, StreamConfig};
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use std::io::Write;
@@ -199,24 +199,25 @@ impl ScreencastPipeline {
         port: u16,
         node_id: Option<u32>,
         fd: Option<i32>,
-    ) -> Result<(), String> {
-        gstreamer::init().map_err(|e| format!("Failed to init GStreamer: {}", e))?;
+    ) -> Result<(), DaemonError> {
+        gstreamer::init()
+            .map_err(|e| DaemonError::other(format!("Failed to init GStreamer: {}", e)))?;
 
         let pipeline_str = self.build_pipeline_desc(node_id, fd);
         tracing::info!("Launching GStreamer Screencast Pipeline: {}", pipeline_str);
 
         let element = gstreamer::parse::launch(&pipeline_str)
-            .map_err(|e| format!("Failed to parse pipeline: {}", e))?;
+            .map_err(|e| DaemonError::other(format!("Failed to parse pipeline: {}", e)))?;
 
         let pipeline = element
             .dynamic_cast::<gstreamer::Pipeline>()
-            .map_err(|_| "Element is not a Pipeline".to_string())?;
+            .map_err(|_| DaemonError::other("Element is not a Pipeline"))?;
 
         let appsink = pipeline
             .by_name("sink")
-            .ok_or_else(|| "Failed to find appsink element".to_string())?
+            .ok_or_else(|| DaemonError::other("Failed to find appsink element"))?
             .dynamic_cast::<AppSink>()
-            .map_err(|_| "Element 'sink' is not an AppSink".to_string())?;
+            .map_err(|_| DaemonError::other("Element 'sink' is not an AppSink"))?;
 
         let active_stream: Arc<Mutex<Option<std::net::TcpStream>>> = Arc::new(Mutex::new(None));
         let active_stream_listener = active_stream.clone();
@@ -224,11 +225,8 @@ impl ScreencastPipeline {
         let stop_signal = Arc::new(AtomicBool::new(false));
         let stop_signal_thread = stop_signal.clone();
 
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .map_err(|e| format!("Failed to bind TCP listener on port {}: {}", port, e))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("Failed to set non-blocking on TCP listener: {}", e))?;
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
+        listener.set_nonblocking(true)?;
 
         thread::spawn(move || {
             while !stop_signal_thread.load(Ordering::SeqCst) {
@@ -236,7 +234,9 @@ impl ScreencastPipeline {
                     Ok((stream, addr)) => {
                         tracing::info!("Video stream client connected from {}", addr);
                         let _ = stream.set_nodelay(true);
-                        let mut guard = active_stream_listener.lock().unwrap();
+                        let mut guard = active_stream_listener
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         *guard = Some(stream);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -296,12 +296,15 @@ impl ScreencastPipeline {
                         );
                         tracing::error!("{}", err_msg);
                         let _ = pipeline.set_state(gstreamer::State::Null);
-                        return Err(err_msg);
+                        return Err(DaemonError::other(err_msg));
                     }
                 }
             }
             let _ = pipeline.set_state(gstreamer::State::Null);
-            return Err(format!("Failed to set pipeline to Playing: {}", e));
+            return Err(DaemonError::other(format!(
+                "Failed to set pipeline to Playing: {}",
+                e
+            )));
         }
 
         self.pipeline = Some(pipeline);
@@ -319,5 +322,124 @@ impl ScreencastPipeline {
             let _ = pipeline.set_state(gstreamer::State::Null);
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_gst() {
+        let _ = gstreamer::init();
+    }
+
+    #[test]
+    fn supported_properties_filters_to_what_the_element_exposes() {
+        init_gst();
+        // "identity" is a core GStreamer element guaranteed to exist and to expose "silent"
+        // (a bool property) but not a made-up property name.
+        let props = ScreencastPipeline::supported_properties(
+            "identity",
+            &[("silent", "true"), ("not-a-real-property", "42")],
+        );
+        assert!(
+            props.contains("silent=true"),
+            "expected a supported property to be kept, got: {props}"
+        );
+        assert!(
+            !props.contains("not-a-real-property"),
+            "expected an unsupported property to be filtered out, got: {props}"
+        );
+    }
+
+    #[test]
+    fn supported_properties_empty_for_nonexistent_element() {
+        init_gst();
+        let props = ScreencastPipeline::supported_properties(
+            "this-element-does-not-exist",
+            &[("foo", "bar")],
+        );
+        assert_eq!(props, "");
+    }
+
+    #[test]
+    fn is_running_confined_false_outside_flatpak() {
+        // The test/CI environment never has /.flatpak-info; this guards the sandbox-detection
+        // heuristic (see the git history for how many times it's been wrong) against silently
+        // flipping to "always sandboxed" or "always native".
+        assert!(!ScreencastPipeline::is_running_confined());
+    }
+
+    #[test]
+    fn build_pipeline_desc_includes_node_id_and_fd_in_source() {
+        init_gst();
+        let config = StreamConfig {
+            width: 1920,
+            height: 1080,
+            ..StreamConfig::default()
+        };
+        let pipeline = ScreencastPipeline::new(config);
+        let desc = pipeline.build_pipeline_desc(Some(42), Some(7));
+        assert!(desc.contains("fd=7"), "missing fd in: {desc}");
+        assert!(desc.contains("path=42"), "missing node_id path in: {desc}");
+    }
+
+    #[test]
+    fn build_pipeline_desc_omits_fd_and_path_when_absent() {
+        init_gst();
+        let pipeline = ScreencastPipeline::new(StreamConfig::default());
+        let desc = pipeline.build_pipeline_desc(None, None);
+        assert!(!desc.contains("fd="), "unexpected fd in: {desc}");
+        assert!(!desc.contains("path="), "unexpected path in: {desc}");
+    }
+
+    #[test]
+    fn build_pipeline_desc_has_no_fixed_framerate_constraint() {
+        init_gst();
+        // Regression guard: a fixed framerate anywhere in this pipeline breaks caps negotiation
+        // against the portal's damage-driven (0/1) screencast node - see the long comment on
+        // `build_pipeline_desc` for the two confirmed failure modes this avoids.
+        let config = StreamConfig {
+            fps: 120,
+            ..StreamConfig::default()
+        };
+        let pipeline = ScreencastPipeline::new(config);
+        let desc = pipeline.build_pipeline_desc(None, None);
+        assert!(
+            !desc.contains("framerate="),
+            "pipeline must never pin a framerate: {desc}"
+        );
+    }
+
+    #[test]
+    fn build_pipeline_desc_forces_annex_b_baseline_h264() {
+        init_gst();
+        // Regression guard: the Android client's MediaCodec decoder only understands Annex-B,
+        // baseline-profile H.264 - see the long comment on `build_pipeline_desc` for why this
+        // silently breaks decoding (no error either side) if it regresses.
+        let pipeline = ScreencastPipeline::new(StreamConfig::default());
+        let desc = pipeline.build_pipeline_desc(None, None);
+        assert!(
+            desc.contains("profile=baseline"),
+            "missing baseline profile: {desc}"
+        );
+        assert!(
+            desc.contains("stream-format=byte-stream"),
+            "missing Annex-B stream format: {desc}"
+        );
+    }
+
+    #[test]
+    fn build_pipeline_desc_matches_configured_resolution() {
+        init_gst();
+        let config = StreamConfig {
+            width: 2560,
+            height: 1600,
+            ..StreamConfig::default()
+        };
+        let pipeline = ScreencastPipeline::new(config);
+        let desc = pipeline.build_pipeline_desc(None, None);
+        assert!(desc.contains("width=2560"));
+        assert!(desc.contains("height=1600"));
     }
 }
