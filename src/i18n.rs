@@ -143,6 +143,13 @@ pub fn tr(key: &str) -> &'static str {
                 "Failed to start stream"
             }
         }
+        "stream_stopped_externally" => {
+            if spanish {
+                "Transmisión detenida desde el sistema"
+            } else {
+                "Stream stopped from the system"
+            }
+        }
 
         "tray_show" => {
             if spanish {

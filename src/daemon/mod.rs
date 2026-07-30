@@ -165,6 +165,24 @@ impl NibDaemon {
         Ok(())
     }
 
+    /// Reports whether this stream's portal session is still open. `false` means it was closed
+    /// by something other than `stop_stream` - most notably GNOME Shell's own screen-sharing
+    /// system indicator - so the caller should tear the daemon down even though `is_streaming`
+    /// is still `true`.
+    ///
+    /// Uses a non-blocking `try_lock` since this is meant to be polled inline from synchronous
+    /// UI code; a momentarily contended lock (e.g. a concurrent teardown already in flight) is
+    /// treated as "still alive" rather than blocking the caller.
+    pub fn is_session_alive(&self) -> bool {
+        match &self.vm_manager {
+            Some(vm_mgr_arc) => match vm_mgr_arc.try_lock() {
+                Ok(vm_mgr) => !vm_mgr.is_session_closed(),
+                Err(_) => true,
+            },
+            None => true,
+        }
+    }
+
     /// Stops the input server, screencast pipeline, and portal display session, in that order.
     pub async fn stop_stream(&mut self) {
         tracing::info!("Stopping Nib Display Stream...");

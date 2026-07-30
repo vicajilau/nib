@@ -318,6 +318,48 @@ impl ConnectionStatusPage {
         let imp = self.imp();
         devices.sort();
 
+        // Detect streams whose portal session was closed externally - most notably GNOME
+        // Shell's own screen-sharing system indicator ("Turn Off" button) - rather than
+        // through nib's "Stop stream" control. Without this, `is_streaming` stays stuck true
+        // and the device keeps showing as connected even though the phone/tablet already
+        // disconnected on its end.
+        let externally_stopped_serials: Vec<String> = {
+            let daemons = imp.daemons.borrow();
+            daemons
+                .iter()
+                .filter(|(_, d)| d.is_streaming && !d.is_session_alive())
+                .map(|(serial, _)| serial.clone())
+                .collect()
+        };
+
+        if !externally_stopped_serials.is_empty() {
+            let daemons_ref = imp.daemons.clone();
+            let self_weak = self.downgrade();
+
+            glib::MainContext::default().spawn_local(async move {
+                let _guard = TOKIO_RT.enter();
+                for serial in externally_stopped_serials {
+                    let daemon_opt = {
+                        let mut map = daemons_ref.borrow_mut();
+                        map.remove(&serial)
+                    };
+                    if let Some(mut daemon) = daemon_opt {
+                        tracing::info!(
+                            "Stream for device {} was stopped externally (system screen-sharing control), tearing down",
+                            serial
+                        );
+                        daemon.stop_stream().await;
+                        if let Some(page) = self_weak.upgrade() {
+                            page.notify_user(
+                                &format!("{} ({})", i18n::tr("stream_stopped_externally"), serial),
+                                &format!("external-stop-{}", serial),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         // Detect devices that were unplugged and stop their active stream daemons
         let unplugged_serials: Vec<String> = {
             let daemons = imp.daemons.borrow();

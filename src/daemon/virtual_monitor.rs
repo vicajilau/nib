@@ -2,10 +2,37 @@ use crate::daemon::DaemonError;
 use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::{PersistMode, Session};
+use futures_util::StreamExt;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use zbus::zvariant::OwnedValue;
+
+/// Cumulative delta (in the client's swipe-delta units) a 3-finger swipe must reach on one
+/// axis before it triggers a workspace switch (horizontal) or Overview toggle (vertical).
+const SWIPE_TRIGGER_THRESHOLD: f64 = 120.0;
+
+/// Gap between consecutive `SwipeGesture` packets after which the next packet is treated as
+/// the start of a new gesture rather than a continuation of the current one.
+const SWIPE_GESTURE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Accumulated state for the 3-finger swipe gesture currently in progress, used to fire at
+/// most one action per physical gesture (see `notify_swipe_gesture`).
+#[derive(Default)]
+struct SwipeGestureState {
+    dx_accum: f64,
+    dy_accum: f64,
+    last_event: Option<Instant>,
+    fired: bool,
+}
+
+/// The GNOME action a completed 3-finger swipe gesture should trigger.
+enum SwipeAction {
+    Overview,
+    WorkspaceLeft,
+    WorkspaceRight,
+}
 
 /// Selects how the streamed display is exposed on the GNOME desktop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +87,11 @@ pub struct VirtualMonitorManager {
     node_id: Option<u32>,
     pipewire_fd: Option<OwnedFd>,
     remote_desktop: Option<RemoteDesktop>,
-    session: Option<Session<RemoteDesktop>>,
+    // `Arc`-wrapped so a background task can hold its own handle to await the `Closed` signal
+    // for the session's full lifetime without borrowing from `self` (ashpd's `Session` doesn't
+    // implement `Clone`, and Rust 2024's RPITIT capture rules would otherwise tie the signal
+    // stream's lifetime to a short-lived local borrow).
+    session: Option<Arc<Session<RemoteDesktop>>>,
     /// Whether the display session extends the desktop or mirrors an existing monitor.
     pub display_mode: DisplayMode,
     width: u32,
@@ -68,6 +99,11 @@ pub struct VirtualMonitorManager {
     /// Tracks whether the most recent pointer input targeted the virtual/mirrored display,
     /// so the cursor can be reset to the primary screen on teardown.
     pub was_last_input_on_virtual: AtomicBool,
+    /// Set by a background watcher when the portal session's `Closed` signal fires - e.g. the
+    /// user stops sharing from GNOME Shell's own screen-sharing system indicator rather than
+    /// nib's "Stop stream" button. Polled by `NibDaemon::is_session_alive` so the app notices
+    /// and tears its own state down instead of staying stuck showing "streaming".
+    session_closed: Arc<AtomicBool>,
 
     x_offset: AtomicI32,
     y_offset: AtomicI32,
@@ -75,6 +111,7 @@ pub struct VirtualMonitorManager {
     actual_height: AtomicI32,
     last_abs_x: Mutex<f64>,
     last_abs_y: Mutex<f64>,
+    swipe_state: Mutex<SwipeGestureState>,
 }
 
 impl VirtualMonitorManager {
@@ -89,12 +126,14 @@ impl VirtualMonitorManager {
             width: 2560,
             height: 1600,
             was_last_input_on_virtual: AtomicBool::new(false),
+            session_closed: Arc::new(AtomicBool::new(false)),
             x_offset: AtomicI32::new(0),
             y_offset: AtomicI32::new(0),
             actual_width: AtomicI32::new(2560),
             actual_height: AtomicI32::new(1600),
             last_abs_x: Mutex::new(0.0),
             last_abs_y: Mutex::new(0.0),
+            swipe_state: Mutex::new(SwipeGestureState::default()),
         })
     }
 
@@ -248,6 +287,39 @@ impl VirtualMonitorManager {
 
         self.node_id = node_id;
         self.remote_desktop = Some(rd_proxy);
+
+        let session = Arc::new(session);
+
+        // Watch for the session being closed by something other than nib's own
+        // `destroy_display` - most notably GNOME Shell's screen-sharing system indicator,
+        // whose "Turn Off" button closes the portal session directly. Without this, nib never
+        // learns the stream ended and keeps showing it as active until the user manually
+        // presses "Stop stream". The subscription is set up inside the spawned task itself
+        // (rather than awaited here and the resulting stream handed off) so it can hold its
+        // own `Arc` clone of the session for as long as it runs, instead of borrowing one that
+        // only lives for the duration of this function call.
+        let session_watch = session.clone();
+        let flag = self.session_closed.clone();
+        self.session_closed.store(false, Ordering::SeqCst);
+        tokio::spawn(async move {
+            match session_watch.receive_closed().await {
+                Ok(mut closed_stream) => {
+                    if closed_stream.next().await.is_some() {
+                        tracing::info!(
+                            "Portal session closed externally (e.g. system screen-sharing control)"
+                        );
+                        flag.store(true, Ordering::SeqCst);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to subscribe to portal session Closed signal; external stops won't be detected: {}",
+                        e
+                    );
+                }
+            }
+        });
+
         self.session = Some(session);
 
         if self.display_mode == DisplayMode::Extend && !got_position_from_stream {
@@ -603,12 +675,118 @@ impl VirtualMonitorManager {
         self.notify_pointer_motion_absolute(norm_x, norm_y).await
     }
 
-    /// Handles continuous 1:1 swipe gestures and triggers overview toggle when threshold is met.
-    pub async fn notify_swipe_gesture(&self, _dx: f64, dy: f64) -> Result<(), DaemonError> {
+    /// Handles a 3-finger swipe gesture, streamed by the client as one delta packet per
+    /// touch-move frame for the whole gesture. Deltas are accumulated per-axis across the
+    /// gesture (reset after a gap of `SWIPE_GESTURE_TIMEOUT` with no packets, which reliably
+    /// separates distinct gestures) so the dominant axis fires exactly one action -
+    /// horizontal for GNOME workspace switching, vertical for the Overview toggle - instead of
+    /// re-firing on every packet whose *own* delta happens to clear the threshold.
+    pub async fn notify_swipe_gesture(&self, dx: f64, dy: f64) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        tracing::info!("SWIPE GESTURE -> dy: {:.2}", dy);
-        if dy.abs() > 30.0 {
-            let _ = self.notify_overview_toggle().await;
+
+        let action = {
+            let mut state = self.swipe_state.lock().unwrap();
+            let now = Instant::now();
+            let gesture_expired = state
+                .last_event
+                .is_none_or(|last| now.duration_since(last) > SWIPE_GESTURE_TIMEOUT);
+            if gesture_expired {
+                state.dx_accum = 0.0;
+                state.dy_accum = 0.0;
+                state.fired = false;
+            }
+            state.last_event = Some(now);
+            state.dx_accum += dx;
+            state.dy_accum += dy;
+
+            if state.fired {
+                None
+            } else if state.dy_accum.abs() > SWIPE_TRIGGER_THRESHOLD
+                && state.dy_accum.abs() >= state.dx_accum.abs()
+            {
+                state.fired = true;
+                Some(SwipeAction::Overview)
+            } else if state.dx_accum.abs() > SWIPE_TRIGGER_THRESHOLD {
+                state.fired = true;
+                Some(if state.dx_accum > 0.0 {
+                    SwipeAction::WorkspaceRight
+                } else {
+                    SwipeAction::WorkspaceLeft
+                })
+            } else {
+                None
+            }
+        };
+
+        match action {
+            Some(SwipeAction::Overview) => {
+                tracing::info!("SWIPE GESTURE -> Overview toggle");
+                self.notify_overview_toggle().await
+            }
+            Some(SwipeAction::WorkspaceLeft) => {
+                tracing::info!("SWIPE GESTURE -> Workspace Left");
+                self.notify_workspace_switch(false).await
+            }
+            Some(SwipeAction::WorkspaceRight) => {
+                tracing::info!("SWIPE GESTURE -> Workspace Right");
+                self.notify_workspace_switch(true).await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Injects GNOME's default "switch to workspace on the left/right" shortcut
+    /// (Ctrl+Alt+Left/Right) via keycode simulation.
+    pub async fn notify_workspace_switch(&self, right: bool) -> Result<(), DaemonError> {
+        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+        if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
+            const KEY_LEFTCTRL: i32 = 29;
+            const KEY_LEFTALT: i32 = 56;
+            const KEY_LEFT: i32 = 105;
+            const KEY_RIGHT: i32 = 106;
+            let arrow = if right { KEY_RIGHT } else { KEY_LEFT };
+            tracing::info!(
+                "Injecting GNOME Workspace Switch ({})...",
+                if right { "Right" } else { "Left" }
+            );
+            let _ = rd
+                .notify_keyboard_keycode(
+                    session,
+                    KEY_LEFTCTRL,
+                    KeyState::Pressed,
+                    Default::default(),
+                )
+                .await;
+            let _ = rd
+                .notify_keyboard_keycode(
+                    session,
+                    KEY_LEFTALT,
+                    KeyState::Pressed,
+                    Default::default(),
+                )
+                .await;
+            let _ = rd
+                .notify_keyboard_keycode(session, arrow, KeyState::Pressed, Default::default())
+                .await;
+            let _ = rd
+                .notify_keyboard_keycode(session, arrow, KeyState::Released, Default::default())
+                .await;
+            let _ = rd
+                .notify_keyboard_keycode(
+                    session,
+                    KEY_LEFTALT,
+                    KeyState::Released,
+                    Default::default(),
+                )
+                .await;
+            let _ = rd
+                .notify_keyboard_keycode(
+                    session,
+                    KEY_LEFTCTRL,
+                    KeyState::Released,
+                    Default::default(),
+                )
+                .await;
         }
         Ok(())
     }
@@ -703,10 +881,16 @@ impl VirtualMonitorManager {
         Ok(())
     }
 
+    /// Reports whether the portal session was closed externally (see `session_closed`).
+    pub fn is_session_closed(&self) -> bool {
+        self.session_closed.load(Ordering::SeqCst)
+    }
+
     /// Tears down the portal session, resetting the cursor to the primary display origin
     /// if the virtual/mirrored display was last touched.
     pub async fn destroy_display(&mut self) -> Result<(), DaemonError> {
         tracing::info!("Destroying Display Session");
+        self.session_closed.store(false, Ordering::SeqCst);
         if self.was_last_input_on_virtual.swap(false, Ordering::SeqCst) {
             tracing::info!(
                 "Last input was on virtual display; resetting cursor to primary screen origin."
@@ -773,6 +957,54 @@ mod tests {
         assert!(mgr.notify_touch_motion(0, 0.5, 0.5).await.is_ok());
         assert!(mgr.notify_touch_up(0).await.is_ok());
         assert!(mgr.notify_swipe_gesture(0.0, 0.0).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn swipe_gesture_fires_at_most_once_per_continuous_gesture() {
+        // Regression test: a real 3-finger swipe streams many delta packets per gesture, and
+        // several consecutive packets can each individually clear a naive per-packet
+        // threshold, which used to toggle the Overview open and immediately closed again.
+        // The cumulative accumulator must only cross the threshold - and thus "fire" - once.
+        let mgr = VirtualMonitorManager::new().await.unwrap();
+
+        for _ in 0..3 {
+            assert!(mgr.notify_swipe_gesture(0.0, 50.0).await.is_ok());
+        }
+        assert!(
+            mgr.swipe_state.lock().unwrap().fired,
+            "cumulative dy (150) should have crossed the trigger threshold"
+        );
+
+        // Further packets in the same gesture must not re-arm/re-fire.
+        for _ in 0..3 {
+            assert!(mgr.notify_swipe_gesture(0.0, 50.0).await.is_ok());
+        }
+        assert!(mgr.swipe_state.lock().unwrap().fired);
+    }
+
+    #[tokio::test]
+    async fn swipe_gesture_rearms_after_a_gap_between_gestures() {
+        let mgr = VirtualMonitorManager::new().await.unwrap();
+
+        for _ in 0..3 {
+            assert!(mgr.notify_swipe_gesture(0.0, 50.0).await.is_ok());
+        }
+        assert!(mgr.swipe_state.lock().unwrap().fired);
+
+        // Simulate the packet stream going quiet for longer than `SWIPE_GESTURE_TIMEOUT`,
+        // as happens between two separate physical swipes.
+        {
+            let mut state = mgr.swipe_state.lock().unwrap();
+            state.last_event = Some(Instant::now() - Duration::from_millis(500));
+        }
+
+        assert!(mgr.notify_swipe_gesture(0.0, 10.0).await.is_ok());
+        let state = mgr.swipe_state.lock().unwrap();
+        assert!(!state.fired, "a new gesture should be able to fire again");
+        assert_eq!(
+            state.dy_accum, 10.0,
+            "accumulator should reset on a new gesture"
+        );
     }
 
     #[tokio::test]
