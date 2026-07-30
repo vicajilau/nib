@@ -1,4 +1,5 @@
 pub mod adb_transport;
+pub mod cursor_keepalive;
 pub mod input_injector;
 pub mod screencast;
 pub mod virtual_monitor;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use adb_transport::AdbTransportManager;
+use cursor_keepalive::CursorKeepaliveOverlay;
 use input_injector::{InputInjector, InputServer};
 use screencast::ScreencastPipeline;
 use virtual_monitor::{DisplayMode, VirtualMonitorManager};
@@ -25,8 +27,6 @@ pub struct StreamConfig {
     pub encoder: String,
     /// Whether to extend the desktop with a new virtual monitor or mirror an existing one.
     pub display_mode: DisplayMode,
-    /// Whether stylus pressure/tilt input events should be processed.
-    pub enable_stylus: bool,
     /// ADB serial number of the target device, or `None` to use the default/only device.
     pub device_serial: Option<String>,
     /// Local TCP port used for the outgoing H.264 video stream.
@@ -43,7 +43,6 @@ impl Default for StreamConfig {
             fps: 60,
             encoder: "vaapi".to_string(),
             display_mode: DisplayMode::Extend,
-            enable_stylus: true,
             device_serial: None,
             video_port: 6000,
             input_port: 6001,
@@ -58,6 +57,12 @@ pub struct NibDaemon {
     vm_manager: Option<Arc<Mutex<VirtualMonitorManager>>>,
     pipeline: Option<ScreencastPipeline>,
     input_server: Option<InputServer>,
+    /// Forces periodic repaints on an `Extend`-mode virtual monitor so the screencast's
+    /// embedded cursor doesn't freeze on an otherwise-idle desktop. Lives here (not on
+    /// `VirtualMonitorManager`) because it wraps a GTK window, which isn't `Send`, while
+    /// `VirtualMonitorManager` is shared into the input server's `tokio::spawn` task and must
+    /// stay thread-safe; `NibDaemon` itself never leaves the GTK main thread.
+    cursor_keepalive: Option<CursorKeepaliveOverlay>,
     /// Whether a stream is currently active for this daemon instance.
     pub is_streaming: bool,
 }
@@ -70,6 +75,7 @@ impl NibDaemon {
             vm_manager: None,
             pipeline: None,
             input_server: None,
+            cursor_keepalive: None,
             is_streaming: false,
         }
     }
@@ -106,13 +112,29 @@ impl NibDaemon {
         // 2. Mutter / Freedesktop Portal Display Session
         let mut vm_mgr = VirtualMonitorManager::new().await?;
 
-        let (node_id, fd) = vm_mgr
+        let (node_id, fd, resolved_mode) = vm_mgr
             .create_display(
                 self.config.display_mode,
                 self.config.width,
                 self.config.height,
             )
             .await?;
+
+        // The native portal picker can grant a different source type than what was requested
+        // (e.g. the user picks a real screen in the dialog while nib's own settings said
+        // Extend); trust what was actually granted for everything downstream.
+        if resolved_mode != self.config.display_mode {
+            tracing::info!(
+                "Resolved display mode differs from requested: {:?} -> {:?}",
+                self.config.display_mode,
+                resolved_mode
+            );
+            self.config.display_mode = resolved_mode;
+        }
+
+        if self.config.display_mode == DisplayMode::Extend {
+            self.cursor_keepalive = CursorKeepaliveOverlay::start().await;
+        }
 
         let vm_mgr_arc = Arc::new(Mutex::new(vm_mgr));
         self.vm_manager = Some(vm_mgr_arc.clone());
@@ -138,6 +160,9 @@ impl NibDaemon {
     /// Stops the input server, screencast pipeline, and portal display session, in that order.
     pub async fn stop_stream(&mut self) {
         tracing::info!("Stopping Nib Display Stream...");
+        if let Some(overlay) = self.cursor_keepalive.take() {
+            overlay.stop();
+        }
         if let Some(mut server) = self.input_server.take() {
             server.stop();
         }

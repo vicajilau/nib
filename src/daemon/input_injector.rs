@@ -89,9 +89,6 @@ impl InputInjector {
                 );
                 if let Some(vm_arc) = vm_opt {
                     let vm = vm_arc.lock().await;
-                    if slot == 0 {
-                        let _ = vm.notify_pointer_motion_absolute(norm_x, norm_y).await;
-                    }
                     let _ = vm.notify_touch_down(slot, norm_x, norm_y).await;
                 }
             }
@@ -108,9 +105,6 @@ impl InputInjector {
                 if let Some(vm_arc) = vm_opt {
                     let vm = vm_arc.lock().await;
                     let _ = vm.notify_touch_motion(slot, norm_x, norm_y).await;
-                    if slot == 0 {
-                        let _ = vm.notify_pointer_motion_absolute(norm_x, norm_y).await;
-                    }
                 }
             }
             InputEvent::TouchUp { x, y, id } => {
@@ -126,9 +120,6 @@ impl InputInjector {
                 if let Some(vm_arc) = vm_opt {
                     let vm = vm_arc.lock().await;
                     let _ = vm.notify_touch_up(slot).await;
-                    if slot == 0 {
-                        let _ = vm.notify_pointer_motion_absolute(norm_x, norm_y).await;
-                    }
                 }
             }
             InputEvent::Scroll { dx, dy } => {
@@ -315,93 +306,6 @@ pub fn parse_binary_packet(bytes: &[u8; 20]) -> Option<InputEvent> {
     }
 }
 
-/// Parses a legacy space-separated ASCII input line into an `InputEvent`.
-pub fn parse_line(line: &str) -> Option<InputEvent> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    match parts[0] {
-        "TOUCH" => {
-            if parts.len() < 5 {
-                return None;
-            }
-            let action = parts[1];
-            let x: f32 = parts[2].parse().ok()?;
-            let y: f32 = parts[3].parse().ok()?;
-            let id: i32 = parts[4].parse().ok()?;
-            match action {
-                "DOWN" => Some(InputEvent::TouchDown { x, y, id }),
-                "MOVE" => Some(InputEvent::TouchMove { x, y, id }),
-                "UP" => Some(InputEvent::TouchUp { x, y, id }),
-                _ => None,
-            }
-        }
-        "SCROLL" => {
-            if parts.len() < 3 {
-                return None;
-            }
-            let dx: f32 = parts[1].parse().ok()?;
-            let dy: f32 = parts[2].parse().ok()?;
-            Some(InputEvent::Scroll { dx, dy })
-        }
-        "RIGHT_CLICK" => {
-            if parts.len() < 3 {
-                return None;
-            }
-            let x: f32 = parts[1].parse().ok()?;
-            let y: f32 = parts[2].parse().ok()?;
-            Some(InputEvent::RightClick { x, y })
-        }
-        "GESTURE" => {
-            if parts.len() < 2 {
-                return None;
-            }
-            match parts[1] {
-                "OVERVIEW" => Some(InputEvent::OverviewGesture),
-                _ => None,
-            }
-        }
-        "STYLUS" => {
-            if parts.len() < 5 {
-                return None;
-            }
-            let action = parts[1];
-            let x: f32 = parts[2].parse().ok()?;
-            let y: f32 = parts[3].parse().ok()?;
-            let pressure: f32 = parts[4].parse().ok()?;
-            match action {
-                "DOWN" => Some(InputEvent::StylusDown {
-                    x,
-                    y,
-                    pressure,
-                    tilt_x: 0.0,
-                    tilt_y: 0.0,
-                }),
-                "MOVE" => Some(InputEvent::StylusMove {
-                    x,
-                    y,
-                    pressure,
-                    tilt_x: 0.0,
-                    tilt_y: 0.0,
-                }),
-                "UP" => Some(InputEvent::StylusUp { x, y }),
-                _ => None,
-            }
-        }
-        "INIT_RES" => {
-            if parts.len() < 3 {
-                return None;
-            }
-            let width: u32 = parts[1].parse().ok()?;
-            let height: u32 = parts[2].parse().ok()?;
-            Some(InputEvent::InitResolution { width, height })
-        }
-        _ => None,
-    }
-}
-
 /// Asynchronous TCP server listener accepting remote input client socket connections.
 pub struct InputServer {
     stop_tx: Option<watch::Sender<bool>>,
@@ -457,38 +361,25 @@ impl InputServer {
                                                         buffer.extend_from_slice(&temp_buf[..n]);
 
                                                         while !buffer.is_empty() {
-                                                            // Check for Binary Packet (Starts with 0x53 'S')
-                                                            if buffer[0] == BINARY_MAGIC_HEADER {
-                                                                if buffer.len() < 20 {
-                                                                    break; // Need more bytes
-                                                                }
-                                                                let mut pkt_bytes = [0u8; 20];
-                                                                pkt_bytes.copy_from_slice(&buffer[..20]);
-                                                                buffer.drain(..20);
+                                                            if buffer[0] != BINARY_MAGIC_HEADER {
+                                                                tracing::warn!(
+                                                                    "Discarding unexpected byte 0x{:02x} while resyncing input stream",
+                                                                    buffer[0]
+                                                                );
+                                                                buffer.remove(0);
+                                                                continue;
+                                                            }
+                                                            if buffer.len() < 20 {
+                                                                break; // Need more bytes
+                                                            }
+                                                            let mut pkt_bytes = [0u8; 20];
+                                                            pkt_bytes.copy_from_slice(&buffer[..20]);
+                                                            buffer.drain(..20);
 
-                                                                if let Some(event) = parse_binary_packet(&pkt_bytes) {
-                                                                    injector_clone.process_event(event).await;
-                                                                } else {
-                                                                    tracing::warn!("Invalid binary packet received");
-                                                                }
+                                                            if let Some(event) = parse_binary_packet(&pkt_bytes) {
+                                                                injector_clone.process_event(event).await;
                                                             } else {
-                                                                // Fallback to ASCII Line parsing
-                                                                if let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-                                                                    let line_bytes = &buffer[..newline_pos];
-                                                                    if let Ok(line_str) = std::str::from_utf8(line_bytes) {
-                                                                        let trimmed = line_str.trim();
-                                                                        if !trimmed.is_empty() {
-                                                                            if let Some(event) = parse_line(trimmed) {
-                                                                                injector_clone.process_event(event).await;
-                                                                            } else {
-                                                                                tracing::warn!("Failed to parse ASCII line: '{}'", trimmed);
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    buffer.drain(..=newline_pos);
-                                                                } else {
-                                                                    break; // Wait for full line newline
-                                                                }
+                                                                tracing::warn!("Invalid binary packet received");
                                                             }
                                                         }
                                                     }
@@ -596,30 +487,4 @@ mod tests {
         assert_eq!(parse_binary_packet(&pkt), None);
     }
 
-    #[test]
-    fn test_parse_line_legacy_ascii() {
-        let line = "TOUCH DOWN 0.5000 0.7500 0";
-        let event = parse_line(line).expect("Should parse ASCII touch down");
-        assert_eq!(
-            event,
-            InputEvent::TouchDown {
-                x: 0.5,
-                y: 0.75,
-                id: 0
-            }
-        );
-
-        let line_stylus = "STYLUS DOWN 0.3000 0.4000 0.80";
-        let event_stylus = parse_line(line_stylus).expect("Should parse ASCII stylus down");
-        assert_eq!(
-            event_stylus,
-            InputEvent::StylusDown {
-                x: 0.3,
-                y: 0.4,
-                pressure: 0.8,
-                tilt_x: 0.0,
-                tilt_y: 0.0,
-            }
-        );
-    }
 }

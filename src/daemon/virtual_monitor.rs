@@ -114,13 +114,16 @@ impl VirtualMonitorManager {
         }
     }
 
-    /// Requests GNOME Mutter / Portal to capture ScreenCast display with explicit PipeWire Remote FD and Input Injection
+    /// Requests GNOME Mutter / Portal to capture ScreenCast display with explicit PipeWire Remote FD and Input Injection.
+    /// Returns the resolved node ID, PipeWire FD, and the `DisplayMode` actually granted by the
+    /// compositor (see the note on `SourceType` reconciliation below), which may differ from the
+    /// `mode` requested.
     pub async fn create_display(
         &mut self,
         mode: DisplayMode,
         width: u32,
         height: u32,
-    ) -> Result<(Option<u32>, Option<i32>), String> {
+    ) -> Result<(Option<u32>, Option<i32>, DisplayMode), String> {
         self.display_mode = mode;
         self.width = if width > 0 { width } else { 2560 };
         self.height = if height > 0 { height } else { 1600 };
@@ -152,13 +155,21 @@ impl VirtualMonitorManager {
             .map_err(|e| e.to_string())?;
 
         // 2. Select Screencast Sources
+        // Restricted to the type matching nib's own Mirror/Extend selection: the native picker
+        // must only ever offer what the user asked nib for - physical screens for Mirror, the
+        // virtual-monitor option (created without a picker at all) for Extend. Offering both
+        // together would let the native dialog silently override the app's own setting.
+        let requested_source: ashpd::enumflags2::BitFlags<SourceType> = match self.display_mode {
+            DisplayMode::Mirror => SourceType::Monitor.into(),
+            DisplayMode::Extend => SourceType::Virtual.into(),
+        };
         let sc_proxy = Screencast::new().await.map_err(|e| e.to_string())?;
         sc_proxy
             .select_sources(
                 &session,
                 SelectSourcesOptions::default()
                     .set_cursor_mode(CursorMode::Embedded)
-                    .set_sources(SourceType::Monitor | SourceType::Virtual)
+                    .set_sources(requested_source)
                     .set_multiple(false)
                     .set_persist_mode(PersistMode::DoNot),
             )
@@ -181,8 +192,27 @@ impl VirtualMonitorManager {
         let raw_fd = fd.as_raw_fd();
         self.pipewire_fd = Some(fd);
 
+        let mut got_position_from_stream = false;
         let node_id = if let Some(stream) = response.streams().first() {
             let id = stream.pipe_wire_node_id();
+            // Trust what the compositor actually granted over what was requested: the native
+            // picker can still let the user pick something other than the app's own selection.
+            if let Some(granted) = stream.source_type() {
+                let resolved_mode = match granted {
+                    SourceType::Monitor => DisplayMode::Mirror,
+                    SourceType::Virtual => DisplayMode::Extend,
+                    _ => self.display_mode,
+                };
+                if resolved_mode != self.display_mode {
+                    tracing::info!(
+                        "Portal granted source type {:?}, overriding requested display mode {:?} -> {:?}",
+                        granted,
+                        self.display_mode,
+                        resolved_mode
+                    );
+                    self.display_mode = resolved_mode;
+                }
+            }
             if let Some((w, h)) = stream.size() {
                 if w >= 640 && h >= 480 {
                     self.width = w as u32;
@@ -196,6 +226,20 @@ impl VirtualMonitorManager {
                         w, h, self.width, self.height
                     );
                 }
+            }
+            // The virtual monitor never shows up in `DisplayConfig.GetCurrentState` (it's
+            // hidden from that introspection API, apparently deliberately, even though it's a
+            // real spatial part of the desktop layout - confirmed empirically: physical input
+            // can cross a real monitor's edge into it). `stream.position()` is the portal's own
+            // report of where the stream actually sits in the compositor's global coordinate
+            // space, and is the only reliable source for this in `Extend` mode.
+            if let Some((x, y)) = stream.position() {
+                tracing::info!("GNOME Portal reported stream position: ({}, {})", x, y);
+                self.x_offset.store(x, Ordering::SeqCst);
+                self.y_offset.store(y, Ordering::SeqCst);
+                got_position_from_stream = true;
+            } else {
+                tracing::info!("GNOME Portal did not report a stream position");
             }
             tracing::info!(
                 "SUCCESS: ScreenCast PipeWire Node ID: {} with PipeWire Remote FD: {} (Res: {}x{})",
@@ -213,11 +257,14 @@ impl VirtualMonitorManager {
         self.remote_desktop = Some(rd_proxy);
         self.session = Some(session);
 
-        if self.display_mode == DisplayMode::Extend {
+        if self.display_mode == DisplayMode::Extend && !got_position_from_stream {
+            tracing::warn!(
+                "No stream position from the portal; falling back to the DisplayConfig lookup (known not to find headless/virtual outputs on some Mutter versions)"
+            );
             let _ = self.align_virtual_monitor().await;
         }
 
-        Ok((node_id, Some(raw_fd)))
+        Ok((node_id, Some(raw_fd), self.display_mode))
     }
 
     /// Injects absolute pointer motion coordinates onto the virtual display or mirror display.
@@ -304,49 +351,48 @@ impl VirtualMonitorManager {
                 abs_y
             );
 
-            if rd
+            match rd
                 .notify_pointer_motion_absolute(session, node_id, px, py, Default::default())
                 .await
-                .is_ok()
             {
-                return Ok(());
+                Ok(()) => {
+                    tracing::info!("EXTEND MOTION: stream-relative attempt (node_id, local px/py) succeeded");
+                    return Ok(());
+                }
+                Err(e) => tracing::info!("EXTEND MOTION: stream-relative attempt failed: {}", e),
             }
-            if rd
+            match rd
                 .notify_pointer_motion_absolute(session, node_id, abs_x, abs_y, Default::default())
                 .await
-                .is_ok()
             {
-                return Ok(());
+                Ok(()) => {
+                    tracing::info!("EXTEND MOTION: node_id + global abs_x/abs_y attempt succeeded");
+                    return Ok(());
+                }
+                Err(e) => tracing::info!(
+                    "EXTEND MOTION: node_id + global abs_x/abs_y attempt failed: {}",
+                    e
+                ),
             }
-            if rd
+            match rd
                 .notify_pointer_motion_absolute(session, 0, abs_x, abs_y, Default::default())
                 .await
-                .is_ok()
             {
-                return Ok(());
+                Ok(()) => {
+                    tracing::info!("EXTEND MOTION: stream 0 + global abs_x/abs_y attempt succeeded");
+                    return Ok(());
+                }
+                Err(e) => tracing::info!(
+                    "EXTEND MOTION: stream 0 + global abs_x/abs_y attempt failed: {}",
+                    e
+                ),
             }
 
             // Fallback: Relative Motion for Extend Mode
+            tracing::info!("EXTEND MOTION: all absolute attempts failed, falling back to relative motion (dx={:.1}, dy={:.1})", dx, dy);
             let _ = rd
                 .notify_pointer_motion(session, dx, dy, Default::default())
                 .await;
-        }
-        Ok(())
-    }
-
-    /// Injects a mouse pointer button event (pressed or released) via the RemoteDesktop portal.
-    pub async fn notify_pointer_button(&self, button: i32, state: KeyState) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!("Injecting Pointer Button: {} {:?}", button, state);
-            rd.notify_pointer_button(session, button, state, Default::default())
-                .await
-                .map_err(|e| {
-                    tracing::error!("Portal notify_pointer_button error: {}", e);
-                    e.to_string()
-                })?;
-        } else {
-            tracing::warn!("notify_pointer_button skipped: rd or session missing!");
         }
         Ok(())
     }
@@ -405,7 +451,21 @@ impl VirtualMonitorManager {
         Ok(())
     }
 
-    /// Injects a primary touch contact event at normalized screen coordinates.
+    /// Converts normalized (0.0..1.0) coordinates to the stream-local pixel coordinates the
+    /// portal's touch/pointer APIs expect.
+    fn local_pixel(&self, norm_x: f64, norm_y: f64) -> (f64, f64) {
+        let w = self.actual_width.load(Ordering::SeqCst) as f64;
+        let h = self.actual_height.load(Ordering::SeqCst) as f64;
+        (
+            (norm_x.clamp(0.0, 1.0) * w).clamp(0.0, w),
+            (norm_y.clamp(0.0, 1.0) * h).clamp(0.0, h),
+        )
+    }
+
+    /// Injects a touch contact event at normalized screen coordinates via the portal's
+    /// dedicated touch API (`NotifyTouchDown`). Used for real (potentially multi-point) finger
+    /// touches; the stylus path uses the pointer API instead so it gets a visible cursor (see
+    /// `notify_stylus_down`).
     pub async fn notify_touch_down(
         &self,
         slot: u32,
@@ -413,48 +473,88 @@ impl VirtualMonitorManager {
         norm_y: f64,
     ) -> Result<(), String> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        let norm_x = norm_x.clamp(0.0, 1.0);
-        let norm_y = norm_y.clamp(0.0, 1.0);
+        let (px, py) = self.local_pixel(norm_x, norm_y);
+        let node_id = self.node_id.unwrap_or(0);
 
         tracing::info!(
-            "TOUCH DOWN slot {} -> Pointer Motion ({:.4}, {:.4}) + BTN_LEFT Pressed",
+            "TOUCH DOWN slot {} -> Stream {} Pixel ({:.1}, {:.1})",
             slot,
-            norm_x,
-            norm_y
+            node_id,
+            px,
+            py
         );
-        let _ = self.notify_pointer_motion_absolute(norm_x, norm_y).await;
-        let _ = self.notify_pointer_button(272, KeyState::Pressed).await;
-        Ok(())
-    }
-
-    /// Injects touch motion movement at normalized screen coordinates.
-    pub async fn notify_touch_motion(
-        &self,
-        _slot: u32,
-        norm_x: f64,
-        norm_y: f64,
-    ) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        let norm_x = norm_x.clamp(0.0, 1.0);
-        let norm_y = norm_y.clamp(0.0, 1.0);
-
-        let _ = self.notify_pointer_motion_absolute(norm_x, norm_y).await;
-        Ok(())
-    }
-
-    /// Injects touch release event releasing primary pointer button.
-    pub async fn notify_touch_up(&self, slot: u32) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!("TOUCH UP slot {} -> BTN_LEFT Released", slot);
-            let _ = rd
-                .notify_pointer_button(session, 272, KeyState::Released, Default::default())
-                .await;
+            if let Err(e) = rd
+                .notify_touch_down(session, node_id, slot, px, py, Default::default())
+                .await
+            {
+                tracing::error!("notify_touch_down error on slot {}: {}", slot, e);
+            }
         }
         Ok(())
     }
 
-    /// Injects active stylus down contact event with pressure and tilt parameters.
+    /// Injects touch motion movement at normalized screen coordinates via `NotifyTouchMotion`.
+    pub async fn notify_touch_motion(
+        &self,
+        slot: u32,
+        norm_x: f64,
+        norm_y: f64,
+    ) -> Result<(), String> {
+        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+        let (px, py) = self.local_pixel(norm_x, norm_y);
+        let node_id = self.node_id.unwrap_or(0);
+
+        if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
+            if let Err(e) = rd
+                .notify_touch_motion(session, node_id, slot, px, py, Default::default())
+                .await
+            {
+                tracing::error!("notify_touch_motion error on slot {}: {}", slot, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Injects a touch release event via `NotifyTouchUp`.
+    pub async fn notify_touch_up(&self, slot: u32) -> Result<(), String> {
+        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+        if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
+            tracing::info!("TOUCH UP slot {}", slot);
+            if let Err(e) = rd
+                .notify_touch_up(session, slot, Default::default())
+                .await
+            {
+                tracing::error!("notify_touch_up error on slot {}: {}", slot, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Injects a mouse pointer button event (pressed or released) via the RemoteDesktop portal.
+    pub async fn notify_pointer_button(&self, button: i32, state: KeyState) -> Result<(), String> {
+        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+        if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
+            tracing::info!("Injecting Pointer Button: {} {:?}", button, state);
+            rd.notify_pointer_button(session, button, state, Default::default())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Portal notify_pointer_button error: {}", e);
+                    e.to_string()
+                })?;
+        } else {
+            tracing::warn!("notify_pointer_button skipped: rd or session missing!");
+        }
+        Ok(())
+    }
+
+    /// Injects active stylus down contact event via the pointer API
+    /// (`notify_pointer_motion_absolute` + `notify_pointer_button`), rather than the touch API.
+    /// A stylus is single-point and expects a visible cursor tracking it even before contact,
+    /// which only the pointer device drives; a touchscreen contact never moves a visible cursor
+    /// sprite, by design, on any compositor. The RemoteDesktop portal has no pressure/tilt-aware
+    /// input path, so `pressure`/`tilt_x`/`tilt_y` are accepted (for logging/future use) but not
+    /// forwarded.
     pub async fn notify_stylus_down(
         &self,
         norm_x: f64,
@@ -463,9 +563,6 @@ impl VirtualMonitorManager {
         tilt_x: f32,
         tilt_y: f32,
     ) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        let norm_x = norm_x.clamp(0.0, 1.0);
-        let norm_y = norm_y.clamp(0.0, 1.0);
         tracing::info!(
             "STYLUS DOWN -> Norm ({:.4}, {:.4}) Pressure: {:.2} Tilt: ({:.1}, {:.1})",
             norm_x,
@@ -474,12 +571,11 @@ impl VirtualMonitorManager {
             tilt_x,
             tilt_y
         );
-        let _ = self.notify_pointer_motion_absolute(norm_x, norm_y).await;
-        let _ = self.notify_pointer_button(272, KeyState::Pressed).await;
-        Ok(())
+        self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
+        self.notify_pointer_button(272, KeyState::Pressed).await
     }
 
-    /// Injects active stylus motion event with pressure and tilt parameters.
+    /// Injects active stylus motion event via the pointer API.
     pub async fn notify_stylus_move(
         &self,
         norm_x: f64,
@@ -488,9 +584,6 @@ impl VirtualMonitorManager {
         tilt_x: f32,
         tilt_y: f32,
     ) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        let norm_x = norm_x.clamp(0.0, 1.0);
-        let norm_y = norm_y.clamp(0.0, 1.0);
         tracing::trace!(
             "STYLUS MOVE -> Norm ({:.4}, {:.4}) Pressure: {:.2} Tilt: ({:.1}, {:.1})",
             norm_x,
@@ -499,19 +592,14 @@ impl VirtualMonitorManager {
             tilt_x,
             tilt_y
         );
-        let _ = self.notify_pointer_motion_absolute(norm_x, norm_y).await;
-        Ok(())
+        self.notify_pointer_motion_absolute(norm_x, norm_y).await
     }
 
-    /// Injects active stylus lift event at normalized screen coordinates.
+    /// Injects active stylus lift event via the pointer API.
     pub async fn notify_stylus_up(&self, norm_x: f64, norm_y: f64) -> Result<(), String> {
-        self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
-        let norm_x = norm_x.clamp(0.0, 1.0);
-        let norm_y = norm_y.clamp(0.0, 1.0);
         tracing::info!("STYLUS UP -> Norm ({:.4}, {:.4})", norm_x, norm_y);
-        let _ = self.notify_pointer_button(272, KeyState::Released).await;
-        let _ = self.notify_pointer_motion_absolute(norm_x, norm_y).await;
-        Ok(())
+        self.notify_pointer_button(272, KeyState::Released).await?;
+        self.notify_pointer_motion_absolute(norm_x, norm_y).await
     }
 
     /// Handles continuous 1:1 swipe gestures and triggers overview toggle when threshold is met.
@@ -564,6 +652,17 @@ impl VirtualMonitorManager {
 
         let mut found_virtual = false;
         if self.display_mode == DisplayMode::Extend {
+            for lm in &logical_monitors {
+                for spec in &lm.5 {
+                    tracing::info!(
+                        "DisplayConfig logical monitor connector='{}' vendor='{}' product='{}' serial='{}'",
+                        spec.0,
+                        spec.1,
+                        spec.2,
+                        spec.3
+                    );
+                }
+            }
             for lm in &logical_monitors {
                 let x = lm.0;
                 let y = lm.1;

@@ -282,21 +282,6 @@ pub fn tr(key: &str) -> &'static str {
             }
         }
 
-        "stylus_title" => {
-            if spanish {
-                "Habilitar Lápiz Táctil y Presión"
-            } else {
-                "Enable Stylus and Pressure Input"
-            }
-        }
-        "stylus_subtitle" => {
-            if spanish {
-                "Mapear lápiz óptico directamente como digitalizador virtual de GNOME"
-            } else {
-                "Map tablet pen directly to GNOME virtual digitizer"
-            }
-        }
-
         _ => "",
     }
 }

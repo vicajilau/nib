@@ -20,8 +20,6 @@ mod imp {
         pub resolution_row: adw::ComboRow,
         /// Selects the target stream framerate.
         pub framerate_row: adw::ComboRow,
-        /// Toggles whether stylus pressure/tilt input is processed.
-        pub stylus_row: adw::SwitchRow,
     }
 
     #[glib::object_subclass]
@@ -45,8 +43,8 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// Preferences page letting the user configure display mode, resolution, framerate,
-    /// and stylus input before starting a stream.
+    /// Preferences page letting the user configure display mode, resolution, and framerate
+    /// before starting a stream.
     pub struct DisplaySettingsView(ObjectSubclass<imp::DisplaySettingsView>)
         @extends gtk4::Widget, gtk4::Box,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget, gtk4::Orientable;
@@ -58,8 +56,8 @@ impl DisplaySettingsView {
         glib::Object::builder().build()
     }
 
-    /// Builds and populates the preferences rows (mode, resolution, framerate, stylus) with
-    /// their default selections.
+    /// Builds and populates the preferences rows (mode, resolution, framerate) with their
+    /// default selections.
     fn setup_ui(&self) {
         let imp = self.imp();
         self.set_orientation(gtk4::Orientation::Vertical);
@@ -67,6 +65,12 @@ impl DisplaySettingsView {
         imp.preferences_group.set_title(i18n::tr("settings_title"));
         imp.preferences_group
             .set_description(Some(i18n::tr("settings_desc")));
+        // Standard Adwaita preferences-page breathing room; a bare Box (unlike
+        // AdwPreferencesPage) doesn't add this on its own.
+        imp.preferences_group.set_margin_top(24);
+        imp.preferences_group.set_margin_bottom(24);
+        imp.preferences_group.set_margin_start(24);
+        imp.preferences_group.set_margin_end(24);
 
         // 1. Display Mode selector (Extend vs Mirror)
         imp.mode_row.set_title(i18n::tr("mode_title"));
@@ -96,17 +100,9 @@ impl DisplaySettingsView {
             gtk4::StringList::new(&[i18n::tr("fps_60"), i18n::tr("fps_120"), i18n::tr("fps_30")]);
         imp.framerate_row.set_model(Some(&framerates));
 
-        // 4. Stylus input toggle
-        imp.stylus_row.set_title(i18n::tr("stylus_title"));
-        imp.stylus_row.set_subtitle(i18n::tr("stylus_subtitle"));
-        imp.stylus_row
-            .add_prefix(&gtk4::Image::from_icon_name("input-touchpad-symbolic"));
-        imp.stylus_row.set_active(true);
-
         imp.preferences_group.add(&imp.mode_row);
         imp.preferences_group.add(&imp.resolution_row);
         imp.preferences_group.add(&imp.framerate_row);
-        imp.preferences_group.add(&imp.stylus_row);
 
         self.append(&imp.preferences_group);
     }
@@ -132,7 +128,14 @@ impl DisplaySettingsView {
             _ => 60,
         };
 
-        let enable_stylus = imp.stylus_row.is_active();
+        tracing::info!(
+            "get_stream_config: mode_row.selected()={} -> {:?}, {}x{}@{}fps",
+            imp.mode_row.selected(),
+            display_mode,
+            width,
+            height,
+            fps
+        );
 
         StreamConfig {
             width,
@@ -140,7 +143,6 @@ impl DisplaySettingsView {
             fps,
             encoder: "vaapi".to_string(),
             display_mode,
-            enable_stylus,
             device_serial: None,
             video_port: 6000,
             input_port: 6001,

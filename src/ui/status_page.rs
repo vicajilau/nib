@@ -195,8 +195,12 @@ impl ConnectionStatusPage {
 
             tracing::info!("Starting stream for device {}", serial_string);
             let mut config = if let Some(provider) = &*provider_ref.borrow() {
+                tracing::info!("Building StreamConfig from the settings page's config_provider");
                 provider()
             } else {
+                tracing::warn!(
+                    "No config_provider registered; falling back to StreamConfig::default() (display_mode will be Extend regardless of any UI selection)"
+                );
                 StreamConfig::default()
             };
 

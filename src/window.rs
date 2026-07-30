@@ -63,6 +63,13 @@ impl NibWindow {
 
         let header_bar = adw::HeaderBar::new();
 
+        // Without this, the "Display Settings" page (mode/resolution/framerate/stylus) built in
+        // `NibView` is reachable in code but has no on-screen control to navigate to it.
+        let view_switcher = adw::ViewSwitcher::new();
+        view_switcher.set_stack(Some(&imp.view.view_stack()));
+        view_switcher.set_policy(adw::ViewSwitcherPolicy::Wide);
+        header_bar.set_title_widget(Some(&view_switcher));
+
         let menu_button = gtk4::MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         menu_button.set_tooltip_text(Some("Main Menu"));

@@ -85,6 +85,12 @@ impl NibView {
         self.append(&imp.stack);
     }
 
+    /// Returns the view stack switching between the connection and settings pages, so callers
+    /// (the window's header bar) can attach an `AdwViewSwitcher` to navigate between them.
+    pub fn view_stack(&self) -> adw::ViewStack {
+        self.imp().stack.clone()
+    }
+
     /// Stops any currently active device stream, delegating to the status page.
     pub fn stop_active_stream(&self) {
         self.imp().status_page.stop_active_stream();
