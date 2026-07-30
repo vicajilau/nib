@@ -101,6 +101,23 @@ impl CursorKeepaliveOverlay {
         // (asynchronous under Wayland) to establish one.
         window.set_default_size(geom.width(), geom.height());
 
+        // The theme still paints an opaque background behind the drawing area's near-transparent
+        // (1/255 alpha) fill, so without this the overlay shows up as a solid gray rectangle
+        // instead of being effectively invisible.
+        window.add_css_class("nib-cursor-keepalive");
+        let css_provider = gtk4::CssProvider::new();
+        css_provider.load_from_string("window.nib-cursor-keepalive { background-color: transparent; }");
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        // This window must never be user-closable - e.g. via GNOME Shell's Overview, which
+        // offers a close affordance on every window thumbnail regardless of decoration/opacity.
+        // Closing it silently drops the repaint workaround without the daemon noticing.
+        window.connect_close_request(|_| glib::Propagation::Stop);
+
         let drawing_area = gtk4::DrawingArea::new();
         // Without these, a content-less DrawingArea has no natural size of its own; as the sole
         // child of a window forced to the monitor's full fullscreen size, it would collapse to a

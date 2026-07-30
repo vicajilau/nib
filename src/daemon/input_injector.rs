@@ -120,7 +120,7 @@ impl InputInjector {
                 );
                 if let Some(vm_arc) = vm_opt {
                     let vm = vm_arc.lock().await;
-                    let _ = vm.notify_touch_up(slot).await;
+                    let _ = vm.notify_touch_up(slot, norm_x, norm_y).await;
                 }
             }
             InputEvent::Scroll { dx, dy } => {

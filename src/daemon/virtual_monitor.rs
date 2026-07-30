@@ -137,20 +137,25 @@ impl VirtualMonitorManager {
         })
     }
 
-    /// Updates the target/actual display resolution from a client handshake, ignoring
-    /// zero-valued dimensions.
+    /// Logs the connected client device's native screen resolution from its handshake,
+    /// ignoring zero-valued dimensions.
+    ///
+    /// This must NOT touch `actual_width`/`actual_height`: those track the *captured stream's*
+    /// real pixel size (set from the portal's own `stream.size()` in `create_display`), which
+    /// `local_pixel` relies on to convert the client's already-normalized (0.0..1.0) touch/
+    /// pointer coordinates into portal-space pixels. The client sends this handshake over the
+    /// input socket only after `create_display` has already run and fixed that stream size, so
+    /// overwriting it here with the device's own resolution desyncs every subsequent touch/
+    /// pointer position from the real captured stream - the portal then rejects them with
+    /// "Invalid position" once the device resolution differs from the stream's.
     pub fn update_target_resolution(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
             tracing::info!(
-                "Auto-negotiated tablet screen resolution: {}x{} (Aspect Ratio: {:.2}:1)",
+                "Client device native resolution: {}x{} (Aspect Ratio: {:.2}:1)",
                 width,
                 height,
                 width as f64 / height as f64
             );
-            self.width = width;
-            self.height = height;
-            self.actual_width.store(width as i32, Ordering::SeqCst);
-            self.actual_height.store(height as i32, Ordering::SeqCst);
         }
     }
 
@@ -551,10 +556,14 @@ impl VirtualMonitorManager {
         )
     }
 
-    /// Injects a touch contact event at normalized screen coordinates via the portal's
-    /// dedicated touch API (`NotifyTouchDown`). Used for real (potentially multi-point) finger
-    /// touches; the stylus path uses the pointer API instead so it gets a visible cursor (see
-    /// `notify_stylus_down`).
+    /// Injects a touch contact event. On `Mirror` (a real, hardware-backed monitor) this uses
+    /// the portal's dedicated touch API (`NotifyTouchDown`). On `Extend`, real touch is routed
+    /// through the pointer API instead (like `notify_stylus_down`) because `NotifyTouchDown`/
+    /// `NotifyTouchMotion` empirically fail with "Invalid position" for *any* coordinate on the
+    /// headless/virtual output Extend mode captures - regardless of stream-local vs. global
+    /// encoding, unlike absolute pointer motion, which Mutter accepts fine there. This trades
+    /// away true multitouch (e.g. two simultaneous fingers) on `Extend` for taps/drags actually
+    /// working at all, since the real touch API never succeeds there in practice.
     pub async fn notify_touch_down(
         &self,
         slot: u32,
@@ -562,6 +571,13 @@ impl VirtualMonitorManager {
         norm_y: f64,
     ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+
+        if self.display_mode == DisplayMode::Extend {
+            tracing::info!("TOUCH DOWN slot {} -> routed via pointer (Extend mode)", slot);
+            self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
+            return self.notify_pointer_button(272, KeyState::Pressed).await;
+        }
+
         let (px, py) = self.local_pixel(norm_x, norm_y);
         let node_id = self.node_id.unwrap_or(0);
 
@@ -583,7 +599,8 @@ impl VirtualMonitorManager {
         Ok(())
     }
 
-    /// Injects touch motion movement at normalized screen coordinates via `NotifyTouchMotion`.
+    /// Injects touch motion movement. See `notify_touch_down` for why `Extend` routes through
+    /// the pointer API instead of `NotifyTouchMotion`.
     pub async fn notify_touch_motion(
         &self,
         slot: u32,
@@ -591,6 +608,11 @@ impl VirtualMonitorManager {
         norm_y: f64,
     ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+
+        if self.display_mode == DisplayMode::Extend {
+            return self.notify_pointer_motion_absolute(norm_x, norm_y).await;
+        }
+
         let (px, py) = self.local_pixel(norm_x, norm_y);
         let node_id = self.node_id.unwrap_or(0);
 
@@ -605,9 +627,25 @@ impl VirtualMonitorManager {
         Ok(())
     }
 
-    /// Injects a touch release event via `NotifyTouchUp`.
-    pub async fn notify_touch_up(&self, slot: u32) -> Result<(), DaemonError> {
+    /// Injects a touch release event via `NotifyTouchUp` (`Mirror`), or the pointer-button
+    /// release at `norm_x`/`norm_y` (`Extend`) - see `notify_touch_down`. Moves the pointer to
+    /// the release position *before* releasing the button (as in `notify_stylus_up`): the
+    /// portal registers a button release at wherever the pointer currently is, so releasing
+    /// first would register the tap at the previous position instead of the lift-off point.
+    pub async fn notify_touch_up(
+        &self,
+        slot: u32,
+        norm_x: f64,
+        norm_y: f64,
+    ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
+
+        if self.display_mode == DisplayMode::Extend {
+            tracing::info!("TOUCH UP slot {} -> routed via pointer (Extend mode)", slot);
+            self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
+            return self.notify_pointer_button(272, KeyState::Released).await;
+        }
+
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             tracing::info!("TOUCH UP slot {}", slot);
             if let Err(e) = rd.notify_touch_up(session, slot, Default::default()).await {
@@ -685,8 +723,12 @@ impl VirtualMonitorManager {
     /// Injects active stylus lift event via the pointer API.
     pub async fn notify_stylus_up(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
         tracing::info!("STYLUS UP -> Norm ({:.4}, {:.4})", norm_x, norm_y);
-        self.notify_pointer_button(272, KeyState::Released).await?;
-        self.notify_pointer_motion_absolute(norm_x, norm_y).await
+        // Move first, then release: `notify_pointer_button` has no position of its own, so the
+        // portal registers the release wherever the pointer currently is. Releasing before this
+        // final motion would fire the click at the *previous* (last `StylusMove`) position and
+        // only snap the cursor to the lift-off point afterward.
+        self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
+        self.notify_pointer_button(272, KeyState::Released).await
     }
 
     /// Handles a 3-finger swipe gesture, streamed by the client as one delta packet per
@@ -928,32 +970,35 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn local_pixel_scales_normalized_coordinates_to_resolution() {
-        let mut mgr = VirtualMonitorManager::new().await.unwrap();
-        mgr.update_target_resolution(1000, 500);
+    async fn local_pixel_scales_normalized_coordinates_to_the_captured_stream_resolution() {
+        // `local_pixel` scales against `actual_width`/`actual_height` as seeded by `new()` (and
+        // later overwritten by `create_display` from the portal's reported stream size) - never
+        // against the client device's own native resolution.
+        let mgr = VirtualMonitorManager::new().await.unwrap();
 
         assert_eq!(mgr.local_pixel(0.0, 0.0), (0.0, 0.0));
-        assert_eq!(mgr.local_pixel(1.0, 1.0), (1000.0, 500.0));
-        assert_eq!(mgr.local_pixel(0.5, 0.5), (500.0, 250.0));
+        assert_eq!(mgr.local_pixel(1.0, 1.0), (2560.0, 1600.0));
+        assert_eq!(mgr.local_pixel(0.5, 0.5), (1280.0, 800.0));
     }
 
     #[tokio::test]
     async fn local_pixel_clamps_out_of_range_coordinates() {
-        let mut mgr = VirtualMonitorManager::new().await.unwrap();
-        mgr.update_target_resolution(1000, 500);
+        let mgr = VirtualMonitorManager::new().await.unwrap();
 
-        assert_eq!(mgr.local_pixel(-1.0, 2.0), (0.0, 500.0));
+        assert_eq!(mgr.local_pixel(-1.0, 2.0), (0.0, 1600.0));
     }
 
     #[tokio::test]
-    async fn update_target_resolution_ignores_zero_dimensions() {
+    async fn update_target_resolution_does_not_affect_the_captured_stream_pixel_space() {
+        // Regression test: the client's native resolution (learned from the `InitResolution`
+        // handshake, which arrives over the input socket *after* `create_display` already fixed
+        // the real stream/display pixel size via the portal) must never clobber `actual_width`/
+        // `actual_height` - doing so previously desynced touch/pointer coordinate math from the
+        // real captured stream, producing portal "Invalid position" errors.
         let mut mgr = VirtualMonitorManager::new().await.unwrap();
-        mgr.update_target_resolution(800, 600);
 
-        // A zero-valued dimension (seen from a malformed or premature handshake packet) must
-        // not clobber the last good resolution.
-        mgr.update_target_resolution(0, 0);
-        assert_eq!(mgr.local_pixel(1.0, 1.0), (800.0, 600.0));
+        mgr.update_target_resolution(1080, 2400);
+        assert_eq!(mgr.local_pixel(1.0, 1.0), (2560.0, 1600.0));
     }
 
     #[tokio::test]
@@ -969,7 +1014,7 @@ mod tests {
         assert!(mgr.notify_scroll(1.0, 1.0).await.is_ok());
         assert!(mgr.notify_touch_down(0, 0.5, 0.5).await.is_ok());
         assert!(mgr.notify_touch_motion(0, 0.5, 0.5).await.is_ok());
-        assert!(mgr.notify_touch_up(0).await.is_ok());
+        assert!(mgr.notify_touch_up(0, 0.5, 0.5).await.is_ok());
         assert!(mgr.notify_swipe_gesture(0.0, 0.0).await.is_ok());
     }
 
