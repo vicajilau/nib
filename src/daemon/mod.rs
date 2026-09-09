@@ -107,16 +107,20 @@ impl NibDaemon {
 
         // 1. ADB Port Forwarding: map the device's fixed video/input ports to this stream's
         // unique local PC ports.
-        let _ = AdbTransportManager::setup_port_forwarding(
-            self.config.device_serial.as_deref(),
-            video_port,
-            DEVICE_VIDEO_PORT,
-        );
-        let _ = AdbTransportManager::setup_port_forwarding(
-            self.config.device_serial.as_deref(),
-            input_port,
-            DEVICE_INPUT_PORT,
-        );
+        //
+        // Failing here is fatal to the stream: without the forwards the client can never reach
+        // either socket, so swallowing the error would leave the UI reporting an active stream
+        // that silently carries nothing (which is what an unauthorized device used to look
+        // like). If only the video forward went up, take it back down before returning, so a
+        // failed start doesn't leave half a mapping behind on the device.
+        let serial = self.config.device_serial.as_deref();
+        AdbTransportManager::setup_port_forwarding(serial, video_port, DEVICE_VIDEO_PORT)?;
+        if let Err(e) =
+            AdbTransportManager::setup_port_forwarding(serial, input_port, DEVICE_INPUT_PORT)
+        {
+            AdbTransportManager::remove_port_forwarding(serial, DEVICE_VIDEO_PORT);
+            return Err(e);
+        }
 
         // 2. Mutter / Freedesktop Portal Display Session
         let mut vm_mgr = VirtualMonitorManager::new().await?;
@@ -186,7 +190,8 @@ impl NibDaemon {
         }
     }
 
-    /// Stops the input server, screencast pipeline, and portal display session, in that order.
+    /// Stops the input server, screencast pipeline, ADB port forwards, and portal display
+    /// session, in that order.
     pub async fn stop_stream(&mut self) {
         tracing::info!("Stopping Nib Display Stream...");
         if let Some(overlay) = self.cursor_keepalive.take() {
@@ -198,6 +203,12 @@ impl NibDaemon {
         if let Some(mut pipeline) = self.pipeline.take() {
             pipeline.stop();
         }
+        // Retire the forwards only once nothing is listening on either socket. `adb reverse`
+        // mappings live on the device and survive the host process, so skipping this leaves a
+        // stale forward behind after every session.
+        let serial = self.config.device_serial.as_deref();
+        AdbTransportManager::remove_port_forwarding(serial, DEVICE_VIDEO_PORT);
+        AdbTransportManager::remove_port_forwarding(serial, DEVICE_INPUT_PORT);
         if let Some(vm_mgr_arc) = self.vm_manager.take() {
             let mut vm_mgr = vm_mgr_arc.lock().await;
             let _ = vm_mgr.destroy_display().await;
