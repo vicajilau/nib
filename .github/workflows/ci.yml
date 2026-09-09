@@ -107,6 +107,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # cargo-sources.json is generated from Cargo.lock, and nothing regenerates it when a
+      # dependency moves, so every Dependabot bump silently desynchronises the two. Catching
+      # it here takes a second and names the crates; letting the build catch it costs minutes
+      # and surfaces as cargo's "perhaps a crate was updated and forgotten to be re-vendored?".
+      - name: Check cargo-sources.json is in sync with Cargo.lock
+        run: ./build-aux/cargo-sources.py --check
+
       - name: Lint manifest (same checks Flathub's own review bot runs)
         run: flatpak-builder-lint manifest dev.victorcarreras.Nib.json
 
