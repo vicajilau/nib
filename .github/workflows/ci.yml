@@ -160,3 +160,22 @@ jobs:
           cache-key: flatpak-builder-${{ github.sha }}
           bundle: nib.flatpak
           build-bundle: false
+
+      # The manifest lint above only reads the manifest. What actually gates a Flathub
+      # submission is the linter run against the built app and the exported repo, and neither
+      # had ever run here - which is why nothing flagged that the metainfo had no screenshots,
+      # a hard blocker. flatpak_app and repo are the action's own default directories.
+      #
+      # The exceptions file covers three checks that cannot pass outside Flathub's own build
+      # pipeline, where the media actually gets mirrored to dl.flathub.org. It has no effect on
+      # Flathub's review, which uses its own exception list, and it does not blunt the useful
+      # signal: an unreachable screenshot URL reports appstream-missing-screenshots, which is
+      # deliberately not excepted.
+      - name: Lint the built app and the exported repo
+        run: |
+          flatpak-builder-lint \
+            --exceptions --user-exceptions build-aux/flathub-lint-exceptions.json \
+            builddir flatpak_app
+          flatpak-builder-lint \
+            --exceptions --user-exceptions build-aux/flathub-lint-exceptions.json \
+            repo repo

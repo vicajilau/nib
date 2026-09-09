@@ -1,0 +1,7 @@
+{
+    "dev.victorcarreras.Nib": [
+        "appstream-external-screenshot-url",
+        "appstream-remote-icon-not-mirrored",
+        "appstream-screenshots-not-mirrored-in-ostree"
+    ]
+}
