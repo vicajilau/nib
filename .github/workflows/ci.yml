@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags too, so the version and packaging checks below run against the tag
+    # itself, which is the moment they actually matter.
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -113,6 +116,18 @@ jobs:
       # and surfaces as cargo's "perhaps a crate was updated and forgotten to be re-vendored?".
       - name: Check cargo-sources.json is in sync with Cargo.lock
         run: ./build-aux/cargo-sources.py --check
+
+      # v0.1.1 and v0.1.2 were both tagged while Cargo.toml, meson.build and the metainfo all
+      # still said 0.1.0, so the released app reported the wrong version in its About dialog
+      # and AppStream listed no release for either tag. On a tag push this compares every
+      # declaration against the tag itself.
+      - name: Check version declarations agree
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            ./build-aux/check-versions.py --expect "${GITHUB_REF_NAME#v}"
+          else
+            ./build-aux/check-versions.py
+          fi
 
       - name: Lint manifest (same checks Flathub's own review bot runs)
         run: flatpak-builder-lint manifest dev.victorcarreras.Nib.json
