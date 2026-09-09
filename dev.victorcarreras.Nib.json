@@ -8,6 +8,7 @@
     ],
     "command": "nib",
     "finish-args": [
+        "--require-version=1.16.0",
         "--share=network",
         "--share=ipc",
         "--socket=wayland",
