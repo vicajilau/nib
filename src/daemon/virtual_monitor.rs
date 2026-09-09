@@ -4,7 +4,7 @@ use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, S
 use ashpd::desktop::{PersistMode, Session};
 use futures_util::StreamExt;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zbus::zvariant::OwnedValue;
@@ -16,6 +16,44 @@ const SWIPE_TRIGGER_THRESHOLD: f64 = 120.0;
 /// Gap between consecutive `SwipeGesture` packets after which the next packet is treated as
 /// the start of a new gesture rather than a continuation of the current one.
 const SWIPE_GESTURE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Argument shape for `NotifyPointerMotionAbsolute` in `Extend` mode, cached in
+/// `VirtualMonitorManager::motion_strategy` once one is known to work.
+mod motion {
+    /// Nothing known yet: the next motion event probes each shape in turn.
+    pub const UNPROBED: u8 = 0;
+    /// The stream's own node id, with stream-local pixel coordinates.
+    pub const STREAM_LOCAL: u8 = 1;
+    /// The stream's own node id, with desktop-global coordinates.
+    pub const STREAM_GLOBAL: u8 = 2;
+    /// Stream id 0, with desktop-global coordinates.
+    pub const ZERO_GLOBAL: u8 = 3;
+    /// No absolute shape was accepted: send relative deltas instead.
+    pub const RELATIVE: u8 = 4;
+
+    /// The absolute shapes, in the order they are probed.
+    pub const ABSOLUTE_CANDIDATES: [u8; 3] = [STREAM_LOCAL, STREAM_GLOBAL, ZERO_GLOBAL];
+
+    /// Human-readable name for logs.
+    pub fn name(strategy: u8) -> &'static str {
+        match strategy {
+            STREAM_LOCAL => "node_id + stream-local",
+            STREAM_GLOBAL => "node_id + desktop-global",
+            ZERO_GLOBAL => "stream 0 + desktop-global",
+            RELATIVE => "relative deltas",
+            _ => "unprobed",
+        }
+    }
+}
+
+/// The coordinate forms a single `Extend` motion event can be expressed in, computed once per
+/// event and reused across however many strategies get attempted.
+struct MotionCoords {
+    node_id: u32,
+    local: (f64, f64),
+    global: (f64, f64),
+    relative: (f64, f64),
+}
 
 /// Accumulated state for the 3-finger swipe gesture currently in progress, used to fire at
 /// most one action per physical gesture (see `notify_swipe_gesture`).
@@ -112,6 +150,12 @@ pub struct VirtualMonitorManager {
     last_abs_x: Mutex<f64>,
     last_abs_y: Mutex<f64>,
     swipe_state: Mutex<SwipeGestureState>,
+    /// Which `NotifyPointerMotionAbsolute` argument shape this portal accepts in `Extend`
+    /// mode, one of the `motion::*` constants. Portals disagree on whether the coordinates
+    /// are stream-local or desktop-global and on which stream id they want, so the working
+    /// shape has to be found by trying. Caching it keeps steady-state motion at one D-Bus
+    /// round trip per event instead of re-walking the whole list every time.
+    motion_strategy: AtomicU8,
 }
 
 impl VirtualMonitorManager {
@@ -134,6 +178,7 @@ impl VirtualMonitorManager {
             last_abs_x: Mutex::new(0.0),
             last_abs_y: Mutex::new(0.0),
             swipe_state: Mutex::new(SwipeGestureState::default()),
+            motion_strategy: AtomicU8::new(motion::UNPROBED),
         })
     }
 
@@ -377,7 +422,7 @@ impl VirtualMonitorManager {
 
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
             let stream_node_id = self.node_id.unwrap_or(0);
-            tracing::info!(
+            tracing::trace!(
                 "Injecting Mirror Motion Stream Node ID {}: Pixel ({:.1}, {:.1}) (Display: {}x{})",
                 stream_node_id,
                 px,
@@ -431,64 +476,115 @@ impl VirtualMonitorManager {
         };
 
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            let node_id = self.node_id.unwrap_or(0);
-            tracing::info!(
+            let coords = MotionCoords {
+                node_id: self.node_id.unwrap_or(0),
+                local: (px, py),
+                global: (abs_x, abs_y),
+                relative: (dx, dy),
+            };
+            tracing::trace!(
                 "EXTEND MOTION: Stream {} | Local ({:.1}, {:.1}) | Global ({:.1}, {:.1})",
-                node_id,
+                coords.node_id,
                 px,
                 py,
                 abs_x,
                 abs_y
             );
 
-            match rd
-                .notify_pointer_motion_absolute(session, node_id, px, py, Default::default())
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        "EXTEND MOTION: stream-relative attempt (node_id, local px/py) succeeded"
-                    );
-                    return Ok(());
+            // Fast path: whichever shape worked last time, one round trip. Only if it has
+            // started failing do we fall through and probe again.
+            let cached = self.motion_strategy.load(Ordering::Relaxed);
+            if cached != motion::UNPROBED {
+                match Self::send_motion(rd, session, cached, &coords).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "EXTEND MOTION: cached strategy ({}) stopped working: {}; re-probing",
+                            motion::name(cached),
+                            e
+                        );
+                        self.motion_strategy
+                            .store(motion::UNPROBED, Ordering::Relaxed);
+                    }
                 }
-                Err(e) => tracing::info!("EXTEND MOTION: stream-relative attempt failed: {}", e),
-            }
-            match rd
-                .notify_pointer_motion_absolute(session, node_id, abs_x, abs_y, Default::default())
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!("EXTEND MOTION: node_id + global abs_x/abs_y attempt succeeded");
-                    return Ok(());
-                }
-                Err(e) => tracing::info!(
-                    "EXTEND MOTION: node_id + global abs_x/abs_y attempt failed: {}",
-                    e
-                ),
-            }
-            match rd
-                .notify_pointer_motion_absolute(session, 0, abs_x, abs_y, Default::default())
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        "EXTEND MOTION: stream 0 + global abs_x/abs_y attempt succeeded"
-                    );
-                    return Ok(());
-                }
-                Err(e) => tracing::info!(
-                    "EXTEND MOTION: stream 0 + global abs_x/abs_y attempt failed: {}",
-                    e
-                ),
             }
 
-            // Fallback: Relative Motion for Extend Mode
-            tracing::info!("EXTEND MOTION: all absolute attempts failed, falling back to relative motion (dx={:.1}, dy={:.1})", dx, dy);
-            let _ = rd
-                .notify_pointer_motion(session, dx, dy, Default::default())
-                .await;
+            for candidate in motion::ABSOLUTE_CANDIDATES {
+                match Self::send_motion(rd, session, candidate, &coords).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            "EXTEND MOTION: portal accepted {}; caching it for this session",
+                            motion::name(candidate)
+                        );
+                        self.motion_strategy.store(candidate, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    Err(e) => tracing::debug!(
+                        "EXTEND MOTION: portal rejected {}: {}",
+                        motion::name(candidate),
+                        e
+                    ),
+                }
+            }
+
+            tracing::info!(
+                "EXTEND MOTION: no absolute shape accepted, falling back to {}",
+                motion::name(motion::RELATIVE)
+            );
+            self.motion_strategy
+                .store(motion::RELATIVE, Ordering::Relaxed);
+            let _ = Self::send_motion(rd, session, motion::RELATIVE, &coords).await;
         }
         Ok(())
+    }
+
+    /// Issues one pointer-motion call in the argument shape `strategy` names. Split out so the
+    /// cached fast path and the probe loop send events exactly the same way.
+    async fn send_motion(
+        rd: &RemoteDesktop,
+        session: &Session<RemoteDesktop>,
+        strategy: u8,
+        coords: &MotionCoords,
+    ) -> Result<(), ashpd::Error> {
+        let (local_x, local_y) = coords.local;
+        let (global_x, global_y) = coords.global;
+        let (dx, dy) = coords.relative;
+        match strategy {
+            motion::STREAM_LOCAL => {
+                rd.notify_pointer_motion_absolute(
+                    session,
+                    coords.node_id,
+                    local_x,
+                    local_y,
+                    Default::default(),
+                )
+                .await
+            }
+            motion::STREAM_GLOBAL => {
+                rd.notify_pointer_motion_absolute(
+                    session,
+                    coords.node_id,
+                    global_x,
+                    global_y,
+                    Default::default(),
+                )
+                .await
+            }
+            motion::ZERO_GLOBAL => {
+                rd.notify_pointer_motion_absolute(
+                    session,
+                    0,
+                    global_x,
+                    global_y,
+                    Default::default(),
+                )
+                .await
+            }
+            _ => {
+                rd.notify_pointer_motion(session, dx, dy, Default::default())
+                    .await
+            }
+        }
     }
 
     /// Injects a contextual right-click event at normalized screen coordinates.
@@ -497,7 +593,7 @@ impl VirtualMonitorManager {
         let norm_x = norm_x.clamp(0.0, 1.0);
         let norm_y = norm_y.clamp(0.0, 1.0);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!(
+            tracing::debug!(
                 "Injecting Right Click (BTN_RIGHT 273) at ({:.4}, {:.4})...",
                 norm_x,
                 norm_y
@@ -520,7 +616,7 @@ impl VirtualMonitorManager {
     pub async fn notify_overview_toggle(&self) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!("Injecting GNOME Overview Gesture (Super Key 125)...");
+            tracing::debug!("Injecting GNOME Overview Gesture (Super Key 125)...");
             let _ = rd
                 .notify_pointer_button(session, 272, KeyState::Released, Default::default())
                 .await;
@@ -573,7 +669,7 @@ impl VirtualMonitorManager {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
 
         if self.display_mode == DisplayMode::Extend {
-            tracing::info!(
+            tracing::debug!(
                 "TOUCH DOWN slot {} -> routed via pointer (Extend mode)",
                 slot
             );
@@ -584,7 +680,7 @@ impl VirtualMonitorManager {
         let (px, py) = self.local_pixel(norm_x, norm_y);
         let node_id = self.node_id.unwrap_or(0);
 
-        tracing::info!(
+        tracing::debug!(
             "TOUCH DOWN slot {} -> Stream {} Pixel ({:.1}, {:.1})",
             slot,
             node_id,
@@ -644,13 +740,13 @@ impl VirtualMonitorManager {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
 
         if self.display_mode == DisplayMode::Extend {
-            tracing::info!("TOUCH UP slot {} -> routed via pointer (Extend mode)", slot);
+            tracing::debug!("TOUCH UP slot {} -> routed via pointer (Extend mode)", slot);
             self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
             return self.notify_pointer_button(272, KeyState::Released).await;
         }
 
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!("TOUCH UP slot {}", slot);
+            tracing::debug!("TOUCH UP slot {}", slot);
             if let Err(e) = rd.notify_touch_up(session, slot, Default::default()).await {
                 tracing::error!("notify_touch_up error on slot {}: {}", slot, e);
             }
@@ -666,7 +762,7 @@ impl VirtualMonitorManager {
     ) -> Result<(), DaemonError> {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
         if let (Some(rd), Some(session)) = (&self.remote_desktop, &self.session) {
-            tracing::info!("Injecting Pointer Button: {} {:?}", button, state);
+            tracing::debug!("Injecting Pointer Button: {} {:?}", button, state);
             rd.notify_pointer_button(session, button, state, Default::default())
                 .await
                 .inspect_err(|e| tracing::error!("Portal notify_pointer_button error: {}", e))?;
@@ -691,7 +787,7 @@ impl VirtualMonitorManager {
         tilt_x: f32,
         tilt_y: f32,
     ) -> Result<(), DaemonError> {
-        tracing::info!(
+        tracing::debug!(
             "STYLUS DOWN -> Norm ({:.4}, {:.4}) Pressure: {:.2} Tilt: ({:.1}, {:.1})",
             norm_x,
             norm_y,
@@ -725,7 +821,7 @@ impl VirtualMonitorManager {
 
     /// Injects active stylus lift event via the pointer API.
     pub async fn notify_stylus_up(&self, norm_x: f64, norm_y: f64) -> Result<(), DaemonError> {
-        tracing::info!("STYLUS UP -> Norm ({:.4}, {:.4})", norm_x, norm_y);
+        tracing::debug!("STYLUS UP -> Norm ({:.4}, {:.4})", norm_x, norm_y);
         // Move first, then release: `notify_pointer_button` has no position of its own, so the
         // portal registers the release wherever the pointer currently is. Releasing before this
         // final motion would fire the click at the *previous* (last `StylusMove`) position and
@@ -779,15 +875,15 @@ impl VirtualMonitorManager {
 
         match action {
             Some(SwipeAction::Overview) => {
-                tracing::info!("SWIPE GESTURE -> Overview toggle");
+                tracing::debug!("SWIPE GESTURE -> Overview toggle");
                 self.notify_overview_toggle().await
             }
             Some(SwipeAction::WorkspaceLeft) => {
-                tracing::info!("SWIPE GESTURE -> Workspace Left");
+                tracing::debug!("SWIPE GESTURE -> Workspace Left");
                 self.notify_workspace_switch(false).await
             }
             Some(SwipeAction::WorkspaceRight) => {
-                tracing::info!("SWIPE GESTURE -> Workspace Right");
+                tracing::debug!("SWIPE GESTURE -> Workspace Right");
                 self.notify_workspace_switch(true).await
             }
             None => Ok(()),
@@ -804,7 +900,7 @@ impl VirtualMonitorManager {
             const KEY_LEFT: i32 = 105;
             const KEY_RIGHT: i32 = 106;
             let arrow = if right { KEY_RIGHT } else { KEY_LEFT };
-            tracing::info!(
+            tracing::debug!(
                 "Injecting GNOME Workspace Switch ({})...",
                 if right { "Right" } else { "Left" }
             );
