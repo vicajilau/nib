@@ -23,7 +23,11 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libpipewire-0.3-dev \
-            pkg-config
+            pkg-config \
+            meson \
+            ninja-build \
+            desktop-file-utils \
+            appstream
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -41,6 +45,17 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --verbose
+
+      # Runs the desktop-file-validate and appstreamcli checks meson already declares, which
+      # nothing executed before. --no-rebuild skips the cargo-build target: neither test needs
+      # the binary, and the release build the flatpak job already does would be duplicated here.
+      - name: Validate desktop entry and AppStream metadata
+        run: |
+          meson setup _build
+          meson test -C _build --no-rebuild --print-errorlogs
 
   flutter:
     name: Flutter client
