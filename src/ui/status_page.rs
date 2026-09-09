@@ -20,17 +20,24 @@ static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("Failed to create Tokio runtime")
 });
 
-/// Deterministically derives a unique (video, input) TCP port pair for a device serial,
-/// so multiple devices can stream concurrently without port collisions.
-fn get_ports_for_serial(serial: &str) -> (u16, u16) {
-    let mut hash: u32 = 0;
-    for b in serial.bytes() {
-        hash = hash.wrapping_add(b as u32);
+/// How many devices can hold a port pair at once. Bounds the port range Nib occupies to
+/// 6000..=6019, matching what the client's `adb reverse` mapping expects.
+const MAX_DEVICE_SLOTS: u16 = 10;
+
+/// Maps a slot index to its (video, input) TCP port pair.
+fn ports_for_slot(slot: u16) -> (u16, u16) {
+    (6000 + slot * 2, 6001 + slot * 2)
+}
+
+/// Returns the slot `serial` already holds in `slots`, or claims the lowest free one for it.
+/// `None` once all `MAX_DEVICE_SLOTS` slots are taken.
+fn claim_slot(slots: &mut HashMap<String, u16>, serial: &str) -> Option<u16> {
+    if let Some(slot) = slots.get(serial) {
+        return Some(*slot);
     }
-    let slot = (hash % 10) as u16;
-    let video_port = 6000 + slot * 2;
-    let input_port = 6001 + slot * 2;
-    (video_port, input_port)
+    let slot = (0..MAX_DEVICE_SLOTS).find(|candidate| !slots.values().any(|s| s == candidate))?;
+    slots.insert(serial.to_string(), slot);
+    Some(slot)
 }
 
 /// Closure supplied by the settings page to build a `StreamConfig` on demand.
@@ -54,6 +61,9 @@ mod imp {
         pub config_provider: ConfigProvider,
         /// Serials of devices seen on the last device-monitoring poll.
         pub known_devices: Rc<RefCell<Vec<String>>>,
+        /// Port slot reserved for each device serial, released when the device goes away with
+        /// no daemon still attached to it. See `ConnectionStatusPage::ports_for_serial`.
+        pub port_slots: Rc<RefCell<HashMap<String, u16>>>,
         /// Cache of resolved (display name, is_tablet) per serial, to avoid repeated ADB queries.
         pub cached_details: Rc<RefCell<HashMap<String, (String, bool)>>>,
         /// Last rendered device info list, used to skip UI rebuilds when nothing changed.
@@ -102,6 +112,52 @@ impl Default for ConnectionStatusPage {
 }
 
 impl ConnectionStatusPage {
+    /// Returns the (video, input) TCP port pair reserved for `serial`, claiming the lowest
+    /// free slot the first time the device is seen and returning that same pair on every
+    /// later call. Returns `None` once all `MAX_DEVICE_SLOTS` slots are taken.
+    ///
+    /// Deriving the slot from a hash of the serial instead would be simpler, but two
+    /// simultaneously connected devices could then land on the same pair - ADB serials from
+    /// one vendor share a prefix and differ in very few bytes - and the second stream's
+    /// `TcpListener::bind` would fail after the session had already been set up. Handing out
+    /// slots from a pool makes a collision impossible by construction.
+    fn ports_for_serial(&self, serial: &str) -> Option<(u16, u16)> {
+        let mut slots = self.imp().port_slots.borrow_mut();
+        let had_slot = slots.contains_key(serial);
+        match claim_slot(&mut slots, serial) {
+            Some(slot) => {
+                if !had_slot {
+                    tracing::info!("Reserved port slot {} for device {}", slot, serial);
+                }
+                Some(ports_for_slot(slot))
+            }
+            None => {
+                tracing::warn!(
+                    "No free port slot left for device {} ({} slots in use)",
+                    serial,
+                    slots.len()
+                );
+                None
+            }
+        }
+    }
+
+    /// Releases the port slots of devices that are neither connected nor still owned by a
+    /// daemon, so a long-running session doesn't exhaust the pool as devices come and go.
+    /// A device that merely blinks out of `adb devices` while a stream is running keeps its
+    /// slot, since its daemon still holds the bound ports.
+    fn release_unused_port_slots(&self, connected: &[String]) {
+        let imp = self.imp();
+        let streaming: Vec<String> = imp.daemons.borrow().keys().cloned().collect();
+        imp.port_slots.borrow_mut().retain(|serial, slot| {
+            let keep = connected.contains(serial) || streaming.contains(serial);
+            if !keep {
+                tracing::info!("Released port slot {} held by device {}", slot, serial);
+            }
+            keep
+        });
+    }
+
     /// Registers the closure used to build a `StreamConfig` from the settings page when a
     /// new stream is started.
     pub fn set_config_provider<F: Fn() -> StreamConfig + 'static>(&self, provider: F) {
@@ -172,6 +228,14 @@ impl ConnectionStatusPage {
     /// Starts a stream for the given device serial, or stops it if one is already active.
     /// Reuses per-serial ports so multiple devices can stream concurrently.
     pub fn toggle_stream_for_device(&self, serial: &str) {
+        // Reserved up front, on the GTK thread, so the slot is claimed before any other device
+        // can be handled and so an exhausted pool is reported instead of failing later inside
+        // the pipeline's `TcpListener::bind`.
+        let Some((v_port, i_port)) = self.ports_for_serial(serial) else {
+            self.notify_user(i18n::tr("no_free_ports"), "no-free-ports");
+            return;
+        };
+
         let serial_string = serial.to_string();
         let daemons_ref = self.imp().daemons.clone();
         let provider_ref = self.imp().config_provider.clone();
@@ -204,7 +268,6 @@ impl ConnectionStatusPage {
                 StreamConfig::default()
             };
 
-            let (v_port, i_port) = get_ports_for_serial(&serial_string);
             config.device_serial = Some(serial_string.clone());
             config.video_port = v_port;
             config.input_port = i_port;
@@ -397,6 +460,7 @@ impl ConnectionStatusPage {
         }
 
         *imp.known_devices.borrow_mut() = devices.clone();
+        self.release_unused_port_slots(&devices);
 
         let mut device_infos = Vec::new();
         for serial in &devices {
@@ -454,13 +518,18 @@ impl ConnectionStatusPage {
                     } else {
                         "phone-symbolic"
                     };
-                    let (v_port, i_port) = get_ports_for_serial(&info.serial);
-
                     row.set_title(&info.name);
-                    row.set_subtitle(&format!(
-                        "ADB Serial: {} • Ports: Video {} / Input {}",
-                        info.serial, v_port, i_port
-                    ));
+                    row.set_subtitle(&match self.ports_for_serial(&info.serial) {
+                        Some((v_port, i_port)) => format!(
+                            "ADB Serial: {} • Ports: Video {} / Input {}",
+                            info.serial, v_port, i_port
+                        ),
+                        None => format!(
+                            "ADB Serial: {} • {}",
+                            info.serial,
+                            i18n::tr("no_free_ports")
+                        ),
+                    });
                     row.add_prefix(&gtk4::Image::from_icon_name(icon_name));
 
                     let btn = gtk4::Button::new();
@@ -495,5 +564,62 @@ impl ConnectionStatusPage {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_maps_to_its_port_pair() {
+        assert_eq!(ports_for_slot(0), (6000, 6001));
+        assert_eq!(ports_for_slot(1), (6002, 6003));
+        assert_eq!(ports_for_slot(MAX_DEVICE_SLOTS - 1), (6018, 6019));
+    }
+
+    #[test]
+    fn same_serial_keeps_its_slot() {
+        let mut slots = HashMap::new();
+        let first = claim_slot(&mut slots, "ABC123").unwrap();
+        assert_eq!(claim_slot(&mut slots, "ABC123"), Some(first));
+        assert_eq!(slots.len(), 1);
+    }
+
+    #[test]
+    fn distinct_serials_never_share_a_slot() {
+        // Two pairs of realistic ADB serials that each collide under the sum-of-bytes hash the
+        // old scheme derived slots from: transposing any two characters leaves the sum, and so
+        // the slot, unchanged. Both pairs used to be handed the same port pair.
+        let serials = ["R58N12ABCDE", "R58N12ABCED", "ZY22GHKLMN", "ZY22GHKLNM"];
+        let mut slots = HashMap::new();
+        let mut assigned = Vec::new();
+        for serial in serials {
+            assigned.push(claim_slot(&mut slots, serial).unwrap());
+        }
+        let mut unique = assigned.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), assigned.len(), "slots handed out twice");
+    }
+
+    #[test]
+    fn claims_the_lowest_free_slot() {
+        let mut slots = HashMap::new();
+        for i in 0..3 {
+            claim_slot(&mut slots, &format!("device{}", i));
+        }
+        slots.remove("device1");
+        assert_eq!(claim_slot(&mut slots, "newcomer"), Some(1));
+    }
+
+    #[test]
+    fn pool_exhaustion_reports_none_instead_of_reusing() {
+        let mut slots = HashMap::new();
+        for i in 0..MAX_DEVICE_SLOTS {
+            assert!(claim_slot(&mut slots, &format!("device{}", i)).is_some());
+        }
+        assert_eq!(claim_slot(&mut slots, "one-too-many"), None);
+        assert_eq!(slots.len(), MAX_DEVICE_SLOTS as usize);
     }
 }
