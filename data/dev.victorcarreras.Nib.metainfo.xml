@@ -20,6 +20,16 @@
     </ul>
   </description>
   <launchable type="desktop-id">dev.victorcarreras.Nib.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Connected tablets, ready to start streaming</caption>
+      <image>https://raw.githubusercontent.com/vicajilau/nib/main/data/screenshots/connection.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Display mode, resolution and framerate for the stream</caption>
+      <image>https://raw.githubusercontent.com/vicajilau/nib/main/data/screenshots/settings.png</image>
+    </screenshot>
+  </screenshots>
   <url type="homepage">https://github.com/vicajilau/nib</url>
   <url type="bugtracker">https://github.com/vicajilau/nib/issues</url>
   <developer id="dev.victorcarreras">
