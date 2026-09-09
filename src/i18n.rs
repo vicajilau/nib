@@ -150,6 +150,13 @@ pub fn tr(key: &str) -> &'static str {
                 "Stream stopped from the system"
             }
         }
+        "no_free_ports" => {
+            if spanish {
+                "No quedan puertos libres para otro dispositivo"
+            } else {
+                "No free ports left for another device"
+            }
+        }
 
         "tray_show" => {
             if spanish {
