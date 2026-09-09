@@ -106,7 +106,8 @@ impl CursorKeepaliveOverlay {
         // instead of being effectively invisible.
         window.add_css_class("nib-cursor-keepalive");
         let css_provider = gtk4::CssProvider::new();
-        css_provider.load_from_string("window.nib-cursor-keepalive { background-color: transparent; }");
+        css_provider
+            .load_from_string("window.nib-cursor-keepalive { background-color: transparent; }");
         gtk4::style_context_add_provider_for_display(
             &display,
             &css_provider,
