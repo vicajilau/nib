@@ -4,9 +4,25 @@ import 'package:flutter/foundation.dart';
 
 /// Low-latency TCP socket client for transmitting binary input events from mobile device to host daemon.
 class InputSocketClient {
+  /// Delay before the first reconnection attempt after a drop.
+  static const Duration initialRetryDelay = Duration(milliseconds: 250);
+
+  /// Ceiling the retry delay backs off to, so a host that stays down is not hammered.
+  static const Duration maxRetryDelay = Duration(seconds: 5);
+
   Socket? _socket;
+  StreamSubscription<Uint8List>? _subscription;
+  Timer? _reconnectTimer;
+  Duration _retryDelay = initialRetryDelay;
   bool _isConnecting = false;
   bool _isConnected = false;
+
+  /// Set by [disconnect] so a deliberate teardown is not immediately undone by the retry
+  /// loop, and cleared by the next explicit [connect].
+  bool _closedByCaller = false;
+
+  String _host = '127.0.0.1';
+  int _port = 6001;
 
   /// Returns `true` if the input TCP socket is connected to the host server.
   bool get isConnected => _isConnected;
@@ -41,24 +57,55 @@ class InputSocketClient {
     return buffer;
   }
 
-  /// Establishes an asynchronous TCP connection to the host input server.
+  /// Establishes an asynchronous TCP connection to the host input server, and keeps it up:
+  /// if the connection later drops, it is retried with exponential backoff until [disconnect]
+  /// is called.
   Future<void> connect({String host = '127.0.0.1', int port = 6001}) async {
+    _host = host;
+    _port = port;
+    _closedByCaller = false;
     if (_isConnected || _isConnecting) return;
+
     _isConnecting = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     try {
       debugPrint('Connecting Input Socket to $host:$port...');
-      _socket = await Socket.connect(
+      final socket = await Socket.connect(
         host,
         port,
         timeout: const Duration(seconds: 5),
       );
-      _socket?.setOption(SocketOption.tcpNoDelay, true);
+
+      // disconnect() may have been called while the handshake was in flight.
+      if (_closedByCaller) {
+        socket.destroy();
+        return;
+      }
+
+      socket.setOption(SocketOption.tcpNoDelay, true);
+      _socket = socket;
       _isConnected = true;
+      _retryDelay = initialRetryDelay;
+
+      // The host never sends anything back on this socket, but the stream still has to be
+      // listened to. Without a subscription, a peer that goes away is never noticed: `add()`
+      // on a dead socket does not throw synchronously, it reports through this stream, so the
+      // failure surfaced as an unhandled exception while `_isConnected` stayed true forever
+      // and every later event was written into the void.
+      _subscription = socket.listen(
+        (_) {},
+        onDone: () => _handleDrop('closed by host'),
+        onError: (Object e) => _handleDrop('socket error: $e'),
+        cancelOnError: true,
+      );
+
       debugPrint('SUCCESS: Input Socket Connected to $host:$port');
     } catch (e) {
       debugPrint('Input Socket connection failed ($host:$port): $e');
       _isConnected = false;
+      _scheduleReconnect();
     } finally {
       _isConnecting = false;
     }
@@ -168,29 +215,66 @@ class InputSocketClient {
 
   /// Sends a raw 20-byte binary packet payload over the connected socket.
   void _sendPacket(Uint8List packet) {
-    if (!_isConnected) {
-      connect();
+    final socket = _socket;
+    if (!_isConnected || socket == null) {
+      // Dropped deliberately. Input only means anything live, and the retry loop already owns
+      // getting the connection back - reconnecting from here would fire one attempt per event
+      // during a touch burst.
+      _scheduleReconnect();
       return;
     }
     try {
-      _socket?.add(packet);
+      socket.add(packet);
     } catch (e) {
-      debugPrint('Error sending over input socket: $e');
-      _isConnected = false;
-      connect();
+      _handleDrop('write failed: $e');
     }
   }
 
-  /// Closes the input socket connection and cleans up resources.
-  void disconnect() {
-    _isConnecting = false;
+  /// Marks the connection lost and queues a reconnection attempt.
+  void _handleDrop(String reason) {
+    if (!_isConnected && _socket == null) return;
+    debugPrint('Input socket dropped ($reason)');
+    _teardownSocket();
+    _scheduleReconnect();
+  }
+
+  /// Cancels the stream subscription and destroys the socket, leaving retry state alone.
+  void _teardownSocket() {
     _isConnected = false;
+    _subscription?.cancel();
+    _subscription = null;
     try {
       _socket?.destroy();
     } catch (e) {
       debugPrint('Error closing socket: $e');
-    } finally {
-      _socket = null;
     }
+    _socket = null;
+  }
+
+  /// Queues one reconnection attempt, backing off exponentially up to [maxRetryDelay].
+  /// Does nothing after an explicit [disconnect], or while an attempt is already queued.
+  void _scheduleReconnect() {
+    if (_closedByCaller || _reconnectTimer != null || _isConnecting) return;
+
+    final delay = _retryDelay;
+    debugPrint('Reconnecting input socket in ${delay.inMilliseconds} ms');
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      connect(host: _host, port: _port);
+    });
+
+    final next = delay * 2;
+    _retryDelay = next > maxRetryDelay ? maxRetryDelay : next;
+  }
+
+  /// Closes the input socket connection, cancels any queued reconnection, and cleans up
+  /// resources. The connection stays down until [connect] is called again.
+  void disconnect() {
+    _closedByCaller = true;
+    _isConnecting = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _retryDelay = initialRetryDelay;
+    _teardownSocket();
   }
 }

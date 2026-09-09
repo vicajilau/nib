@@ -85,6 +85,40 @@ impl AdbTransportManager {
         }
     }
 
+    /// Tears down a reverse port forward previously established by `setup_port_forwarding`.
+    ///
+    /// Failures are logged rather than returned: this runs on teardown paths that must finish
+    /// regardless (stopping a stream, reacting to an unplugged device), and a device that is
+    /// already gone has no forward left to remove in the first place.
+    pub fn remove_port_forwarding(device_serial: Option<&str>, remote_port: u16) {
+        let adb_bin = Self::find_adb_path();
+        tracing::info!(
+            "Removing ADB reverse port forward tcp:{} (device: {:?})",
+            remote_port,
+            device_serial.unwrap_or("default")
+        );
+
+        let mut cmd = Command::new(&adb_bin);
+        if let Some(serial) = device_serial {
+            cmd.args(["-s", serial]);
+        }
+        cmd.args(["reverse", "--remove", &format!("tcp:{}", remote_port)]);
+
+        match cmd.output() {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => tracing::debug!(
+                "ADB reverse --remove tcp:{} did not succeed: {}",
+                remote_port,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => tracing::debug!(
+                "Failed to execute adb to remove reverse tcp:{}: {}",
+                remote_port,
+                e
+            ),
+        }
+    }
+
     /// Queries device metadata (`ro.product.marketname`, `ro.product.model`) and determines display form factor (tablet vs phone).
     pub fn get_device_details(serial: Option<&str>) -> (String, bool) {
         let adb_bin = Self::find_adb_path();
