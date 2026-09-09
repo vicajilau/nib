@@ -573,7 +573,10 @@ impl VirtualMonitorManager {
         self.was_last_input_on_virtual.store(true, Ordering::SeqCst);
 
         if self.display_mode == DisplayMode::Extend {
-            tracing::info!("TOUCH DOWN slot {} -> routed via pointer (Extend mode)", slot);
+            tracing::info!(
+                "TOUCH DOWN slot {} -> routed via pointer (Extend mode)",
+                slot
+            );
             self.notify_pointer_motion_absolute(norm_x, norm_y).await?;
             return self.notify_pointer_button(272, KeyState::Pressed).await;
         }
