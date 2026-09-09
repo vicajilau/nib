@@ -8,13 +8,14 @@
     ],
     "command": "nib",
     "finish-args": [
+        "--require-version=1.16.0",
         "--share=network",
         "--share=ipc",
         "--socket=wayland",
         "--socket=fallback-x11",
         "--talk-name=org.kde.StatusNotifierWatcher",
         "--device=dri",
-        "--device=all"
+        "--device=usb"
     ],
     "build-options": {
         "append-path": "/usr/lib/sdk/rust-stable/bin"

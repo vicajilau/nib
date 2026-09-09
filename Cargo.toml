@@ -1,6 +1,6 @@
 [package]
 name = "nib"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
 authors = ["Victor C. <34163765+vicajilau@users.noreply.github.com>"]
 description = "Connect your Android tablet as an external display with touch & stylus support in GNOME"

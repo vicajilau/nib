@@ -20,6 +20,16 @@
     </ul>
   </description>
   <launchable type="desktop-id">dev.victorcarreras.Nib.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Connected tablets, ready to start streaming</caption>
+      <image>https://raw.githubusercontent.com/vicajilau/nib/main/data/screenshots/connection.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Display mode, resolution and framerate for the stream</caption>
+      <image>https://raw.githubusercontent.com/vicajilau/nib/main/data/screenshots/settings.png</image>
+    </screenshot>
+  </screenshots>
   <url type="homepage">https://github.com/vicajilau/nib</url>
   <url type="bugtracker">https://github.com/vicajilau/nib/issues</url>
   <developer id="dev.victorcarreras">
@@ -53,6 +63,33 @@
     <control>touch</control>
   </supports>
   <releases>
+    <release version="0.1.3" date="2026-09-09">
+      <description>
+        <ul>
+          <li>Several tablets can now stream at once without competing for the same ports</li>
+          <li>Stopping screen sharing from GNOME's own system menu is now noticed, instead of leaving Nib stuck on "streaming"</li>
+          <li>Connection problems are now reported, rather than leaving a stream that silently carries nothing</li>
+          <li>The tablet app notices when the connection drops and reconnects on its own</li>
+          <li>The streamed image no longer freezes on an otherwise idle desktop</li>
+          <li>Lower latency on touch, stylus and gesture input</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.1.2" date="2026-07-28">
+      <description>
+        <ul>
+          <li>Fixed a black picture on the tablet when running as a Flatpak</li>
+          <li>Software video encoding is now used under sandboxing, where the drivers the hardware encoders need are unavailable</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.1.1" date="2026-07-28">
+      <description>
+        <ul>
+          <li>Fixed the system tray indicator not appearing when running as a Flatpak</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-28">
       <description>
         <p>Initial release.</p>
